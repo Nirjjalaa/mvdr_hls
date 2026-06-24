@@ -829,6 +829,81 @@ Hermitian error (avg) : 0.000000e+00
 Positive real diagonal: 64/64
 Trace of R            : 163.786606
 
+
+
+OUTPUT AFTER MODIFYING MAIN.CPP A BIT
+
+PS C:\mvdr_hls\MVDR_CPP> g++ main.cpp steering_vec.cpp matrix.cpp qr.cpp backsub.cpp -o mvdr
+PS C:\mvdr_hls\MVDR_CPP> ./mvdr                                                             
+===== STAGE 1: STEERING VECTOR =====
+Elements passed : 15/15
+Relative error  : 2.618128e-04
+STAGE 1: PASS Γ£à
+
+===== STAGE 2: COVARIANCE MATRIX R =====
+Hermitian error (avg) : 0.000000e+00
+Positive real diagonal: 64/64
+Trace of R            : 163.786606
+
+Top-left 3x3 of loaded R (real part):
+  2.6160  -0.5551  -0.6254 
+ -0.5551   2.5775  -0.5976 
+ -0.6254  -0.5976   2.5561 
+
+STAGE 2: PASS Γ£à
+
+===== STAGE 3: QR DECOMPOSITION =====
+Lower triangular error (Ru_cpp) : 1.056270e-17
+Q orthogonality error (Q_cpp)   : 1.559203e-16
+QR reconstruction error         : 9.621034e-16
+Diagonal of Ru match error      : 3.231790e-15
+STAGE 3: PASS Γ£à
+
+===== STAGE 4: BACK SUBSTITUTION =====
+Weight vector error ||w_matlab - w_cpp|| : 1.454895e-12
+
+First 5 weights comparison:
+i  | MATLAB                | C++                   | Match
+---|----------------------|----------------------|------
+ 1 |  0.1120 +  0.0025j |  0.1120 +  0.0025j | PASS
+ 2 | -0.0552 +  0.1138j | -0.0552 +  0.1138j | PASS
+ 3 | -0.0504 + -0.0900j | -0.0504 + -0.0900j | PASS
+ 4 |  0.1357 + -0.0021j |  0.1357 + -0.0021j | PASS
+ 5 | -0.0476 +  0.1388j | -0.0476 +  0.1388j | PASS
+
+STAGE 4: PASS Γ£à
+
+===== STAGE 5: GAIN CHECK =====
+
+Gains (C++ weights vs MATLAB steering vectors):
+Target gain  (should be ~1.0) : 1.000000
+I1 gain                       : 0.006502
+I2 gain                       : 0.001657
+
+Suppression:
+I1 rejection : -43.74 dB
+I2 rejection : -55.61 dB
+
+Comparison with MATLAB:
+Metric               | MATLAB     | C++        | Diff      
+-------------------- | ---------- | ---------- | ----------
+Target gain          | 1.0000     | 1.0000     | 0.000000  
+I1 rejection (dB)    | -46.07     | -43.74     | 2.331598  
+I2 rejection (dB)    | -62.32     | -55.61     | 6.707914  
+
+STAGE 5: PASS Γ£à
+
+========================================
+         FINAL VERIFICATION SUMMARY     
+========================================
+Stage 1 - Steering vector   : PASS Γ£à
+Stage 2 - Covariance R      : PASS Γ£à
+Stage 3 - QR Decomposition  : PASS Γ£à
+Stage 4 - Back Substitution : PASS Γ£à
+Stage 5 - Gain Check        : PASS Γ£à
+========================================
+MATLAB ΓåÆ C++ VERIFICATION COMPLETE Γ£à
+========================================
 Top-left 3x3 of loaded R (real part):
   2.6160  -0.5551  -0.6254 
  -0.5551   2.5775  -0.5976 
