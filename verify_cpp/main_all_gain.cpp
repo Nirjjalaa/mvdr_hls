@@ -112,8 +112,15 @@ int main()
     make_complex_2d(re2d, im2d, Ru_matlab, N);
 
     // Run C++ Givens QRD on R_matlab
-    cplx Q_cpp[N][N], Ru_cpp[N][N];
-    givens_qr(R_matlab, Q_cpp, Ru_cpp);
+    
+    // Make a copy so R_matlab stays untouched
+    cplx R_copy[N][N];
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++)
+            R_copy[i][j] = R_matlab[i][j];
+
+cplx Q_cpp[N][N], Ru_cpp[N][N];
+givens_qr(R_copy, Q_cpp, Ru_cpp);
 
     // Check 1: Upper triangular
     double lower_err = 0;
