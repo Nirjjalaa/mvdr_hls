@@ -1,0 +1,267 @@
+Absolutely. Since you'll likely prepare everything on your Windows laptop and then move to the lab machine, here's the Windows version.
+
+
+---
+
+MVDR HLS on Windows
+
+Step 1: Open Vitis HLS
+
+If Vitis is installed:
+
+Start Menu
+   ↓
+AMD/Xilinx Design Tools
+   ↓
+Vitis HLS 2024.1
+
+Or search:
+
+Vitis HLS
+
+in Windows Search.
+
+
+---
+
+Step 2: Create Project Folder
+
+Example:
+
+C:\mvdr_hls\
+│
+├── backsub_hls\
+│   ├── backsub_top.h
+│   ├── backsub_top.cpp
+│   └── tb_backsub.cpp
+│
+└── verify_data\
+    ├── Ru_real.csv
+    ├── Ru_imag.csv
+    ├── y_real.csv
+    ├── y_imag.csv
+    ├── w_real.csv
+    ├── w_imag.csv
+    ├── a_s_real.csv
+    └── a_s_imag.csv
+
+
+---
+
+Step 3: Update CSV Path
+
+Inside:
+
+tb_backsub.cpp
+
+change:
+
+#define CSV_PATH "/home/USERNAME/mvdr_hls/verify_data/"
+
+to:
+
+#define CSV_PATH "C:/mvdr_hls/verify_data/"
+
+or
+
+#define CSV_PATH "C:\\mvdr_hls\\verify_data\\"
+
+I prefer:
+
+#define CSV_PATH "C:/mvdr_hls/verify_data/"
+
+because C++ handles forward slashes correctly.
+
+
+---
+
+Step 4: Create New HLS Project
+
+Open Vitis HLS.
+
+Project Wizard
+
+Page 1
+
+Project Name:
+backsub_hls
+
+Location:
+C:\mvdr_hls\
+
+Click:
+
+Next
+
+
+---
+
+Page 2: Add Design Files
+
+Click:
+
+Add Files
+
+Select:
+
+backsub_top.cpp
+
+Then:
+
+Top Function:
+backsub_top
+
+Click:
+
+Next
+
+
+---
+
+Page 3: Add Testbench
+
+Click:
+
+Add Files
+
+Select:
+
+tb_backsub.cpp
+
+Click:
+
+Next
+
+
+---
+
+Page 4: Part Selection
+
+For your internship board:
+
+xcvc1902-vsva2197-2MP-e-S
+
+Search:
+
+xcvc1902
+
+and select the matching part.
+
+Clock period:
+
+10 ns
+
+Click:
+
+Finish
+
+
+---
+
+Step 5: Run C Simulation
+
+Top Menu:
+
+Solution
+   ↓
+Run C Simulation
+
+Click:
+
+OK
+
+Expected:
+
+Ru loaded.
+y loaded.
+w_matlab loaded.
+a_s loaded.
+
+Calling backsub_top()...
+Done.
+
+Relative error = ...
+BACK SUBSTITUTION HLS: PASS
+
+
+---
+
+Step 6: Run C Synthesis
+
+Top Menu:
+
+Solution
+   ↓
+Run C Synthesis
+
+Click:
+
+OK
+
+Wait a few minutes.
+
+
+---
+
+Step 7: Check Reports
+
+After synthesis:
+
+Solution
+  └── syn
+       └── report
+
+Look for:
+
+Latency
+LUT
+FF
+DSP
+BRAM
+Clock
+
+
+---
+
+Step 8: Export RTL
+
+After successful synthesis:
+
+Solution
+   ↓
+Export RTL
+
+Select:
+
+Verilog
+
+or
+
+VHDL
+
+Generate RTL.
+
+
+---
+
+Expected Workflow for Your Internship
+
+Verified MATLAB
+        ↓
+Verified C++
+        ↓
+BackSub HLS
+        ↓
+QR HLS
+        ↓
+Combine into mvdr_top()
+        ↓
+C Simulation
+        ↓
+Synthesis
+        ↓
+RTL Export
+        ↓
+Versal FPGA
+
+One thing to verify first: Do you actually have Vitis HLS installed on your Windows laptop? If yes, tell me the version (2023.2, 2024.1, etc.), and I can give the exact menu sequence and check whether hls_x_complex.h will work on that version.
