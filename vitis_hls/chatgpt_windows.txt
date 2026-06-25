@@ -265,3 +265,558 @@ RTL Export
 Versal FPGA
 
 One thing to verify first: Do you actually have Vitis HLS installed on your Windows laptop? If yes, tell me the version (2023.2, 2024.1, etc.), and I can give the exact menu sequence and check whether hls_x_complex.h will work on that version.
+Now that I can see your actual verified code, I would not use the earlier HLS code as-is.
+
+Your verified implementation is:
+
+void back_substitution(cplx R[][N], cplx b[], cplx x[])
+{
+    for (int i = N-1; i >= 0; i--) {
+        x[i] = b[i];
+        for (int j = i+1; j < N; j++)
+            x[i] -= R[i][j] * x[j];
+        x[i] /= R[i][i];
+    }
+}
+
+This is much cleaner because:
+
+Already verified against MATLAB ✅
+
+Used in Stage 4 PASS ✅
+
+Produced weight error ≈ 1.45e-12 ✅
+
+
+So for HLS, the goal should be:
+
+Verified back_substitution()
+            ↓
+Wrap into HLS top function
+            ↓
+Run C Simulation
+            ↓
+Run Synthesis
+
+Not:
+
+Verified code
+        ↓
+Rewrite everything
+        ↓
+Hope it still works
+
+
+---
+
+What I would create
+
+backsub_top.h
+
+#ifndef BACKSUB_TOP_H
+#define BACKSUB_TOP_H
+
+#include "constants.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+
+---
+
+backsub_top.cpp
+
+#include "backsub_top.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+#pragma HLS INTERFACE m_axi port=R offset=slave bundle=gmem0
+#pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi port=x offset=slave bundle=gmem2
+
+#pragma HLS INTERFACE s_axilite port=return
+
+    for (int i = N-1; i >= 0; i--) {
+
+        x[i] = b[i];
+
+        for (int j = i+1; j < N; j++) {
+#pragma HLS PIPELINE
+            x[i] -= R[i][j] * x[j];
+        }
+
+        x[i] /= R[i][i];
+    }
+}
+
+Notice:
+
+Algorithm = unchanged
+Math = unchanged
+Only HLS pragmas added
+
+This preserves your verification chain.
+
+
+---
+
+Bigger issue
+
+I still need to see:
+
+constants.h
+
+because that file defines:
+
+typedef ...
+N
+cplx
+
+and that determines whether the code will synthesize.
+
+For example, if you have:
+
+typedef std::complex<double> cplx;
+
+then HLS may synthesize but resource usage will be huge.
+
+If you have:
+
+typedef std::complex<float> cplx;
+
+that's better.
+
+If you later move to:
+
+ap_fixed
+
+that's even better.
+
+
+---
+
+What I recommend next
+
+Paste:
+
+constants.h
+
+and
+
+qr.h
+
+qr.cpp
+
+because your project roadmap is:
+
+Stage 1 Steering Vector ✓
+Stage 2 Covariance ✓
+Stage 3 QR ✓
+Stage 4 BackSub ✓
+
+Next:
+QR HLS
+BackSub HLS
+↓
+mvdr_top()
+
+The QR block is actually the harder and more important HLS module. Once I see constants.h and qr.cpp, I can tell you whether your verified code is already close to synthesizable or whether significant changes are needed before Vitis HLS.
+
+
+Good. Now I can see an important thing:
+
+typedef complex<double> cplx;
+
+Since your verified C++ uses std::complex<double>, the easiest first HLS experiment is to keep the same datatype and get C Simulation working first. We can optimize later.
+
+For your verified back-substitution code, here's the corresponding testbench.
+
+
+---
+
+tb_backsub.cpp
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cmath>
+
+#include "constants.h"
+#include "backsub_top.h"
+
+using namespace std;
+
+// ================================================
+// CSV LOADERS
+// ================================================
+
+void load_csv_1d(
+    string filename,
+    double data[],
+    int size)
+{
+    ifstream file(filename);
+
+    if (!file.is_open()) {
+        cout << "Cannot open " << filename << endl;
+        exit(1);
+    }
+
+    string line;
+    int idx = 0;
+
+    while (getline(file, line) && idx < size) {
+        data[idx++] = stod(line);
+    }
+
+    file.close();
+}
+
+void load_csv_2d(
+    string filename,
+    double data[][N],
+    int rows,
+    int cols)
+{
+    ifstream file(filename);
+
+    if (!file.is_open()) {
+        cout << "Cannot open " << filename << endl;
+        exit(1);
+    }
+
+    string line;
+    int r = 0;
+
+    while (getline(file, line) && r < rows) {
+
+        stringstream ss(line);
+        string value;
+
+        int c = 0;
+
+        while (getline(ss, value, ',') && c < cols) {
+            data[r][c] = stod(value);
+            c++;
+        }
+
+        r++;
+    }
+
+    file.close();
+}
+
+// ================================================
+// MAIN TESTBENCH
+// ================================================
+
+int main()
+{
+    cout << "====================================" << endl;
+    cout << "BACK SUBSTITUTION TESTBENCH" << endl;
+    cout << "====================================" << endl;
+
+    string path = CSV_PATH;
+
+    // ------------------------------------------------
+    // LOAD Ru
+    // ------------------------------------------------
+
+    double Ru_re[N][N];
+    double Ru_im[N][N];
+
+    load_csv_2d(path + "Ru_real.csv", Ru_re, N, N);
+    load_csv_2d(path + "Ru_imag.csv", Ru_im, N, N);
+
+    // ------------------------------------------------
+    // LOAD y
+    // ------------------------------------------------
+
+    double y_re[N];
+    double y_im[N];
+
+    load_csv_1d(path + "y_real.csv", y_re, N);
+    load_csv_1d(path + "y_imag.csv", y_im, N);
+
+    // ------------------------------------------------
+    // LOAD MATLAB WEIGHTS
+    // ------------------------------------------------
+
+    double w_re[N];
+    double w_im[N];
+
+    load_csv_1d(path + "w_real.csv", w_re, N);
+    load_csv_1d(path + "w_imag.csv", w_im, N);
+
+    // ------------------------------------------------
+    // LOAD STEERING VECTOR
+    // ------------------------------------------------
+
+    double as_re[N];
+    double as_im[N];
+
+    load_csv_1d(path + "a_s_real.csv", as_re, N);
+    load_csv_1d(path + "a_s_imag.csv", as_im, N);
+
+    // ------------------------------------------------
+    // BUILD COMPLEX ARRAYS
+    // ------------------------------------------------
+
+    static cplx Ru[N][N];
+    static cplx y[N];
+    static cplx x[N];
+
+    for (int i = 0; i < N; i++) {
+
+        y[i] = cplx(y_re[i], y_im[i]);
+
+        for (int j = 0; j < N; j++) {
+            Ru[i][j] = cplx(
+                Ru_re[i][j],
+                Ru_im[i][j]
+            );
+        }
+    }
+
+    // ------------------------------------------------
+    // RUN DUT
+    // ------------------------------------------------
+
+    cout << "Running backsub_top()..." << endl;
+
+    backsub_top(Ru, y, x);
+
+    cout << "Done." << endl;
+
+    // ------------------------------------------------
+    // NORMALIZE
+    // ------------------------------------------------
+
+    cplx norm_factor = 0.0;
+
+    for (int i = 0; i < N; i++) {
+
+        cplx a(
+            as_re[i],
+            as_im[i]
+        );
+
+        norm_factor += conj(a) * x[i];
+    }
+
+    for (int i = 0; i < N; i++)
+        x[i] /= norm_factor;
+
+    // ------------------------------------------------
+    // COMPARE
+    // ------------------------------------------------
+
+    double err_num = 0;
+    double err_den = 0;
+
+    cout << "\nFirst 5 weights:\n" << endl;
+
+    for (int i = 0; i < 5; i++) {
+
+        cplx w_matlab(
+            w_re[i],
+            w_im[i]
+        );
+
+        double err =
+            abs(x[i] - w_matlab);
+
+        printf(
+            "%2d | MATLAB = %8.5f + %8.5fj"
+            " | HLS = %8.5f + %8.5fj"
+            " | err = %.3e\n",
+            i+1,
+            w_matlab.real(),
+            w_matlab.imag(),
+            x[i].real(),
+            x[i].imag(),
+            err
+        );
+    }
+
+    for (int i = 0; i < N; i++) {
+
+        cplx w_matlab(
+            w_re[i],
+            w_im[i]
+        );
+
+        err_num += norm(
+            x[i] - w_matlab
+        );
+
+        err_den += norm(
+            w_matlab
+        );
+    }
+
+    double rel_err =
+        sqrt(err_num) /
+        sqrt(err_den);
+
+    cout << "\n====================================" << endl;
+    printf("Relative Error = %.6e\n", rel_err);
+
+    if (rel_err < 1e-3)
+        cout << "PASS" << endl;
+    else
+        cout << "FAIL" << endl;
+
+    cout << "====================================" << endl;
+
+    return 0;
+}
+
+Files for your first Windows HLS project
+
+backsub_hls/
+│
+├── constants.h
+├── backsub_top.h
+├── backsub_top.cpp
+└── tb_backsub.cpp
+
+CSV files required
+
+verify_data/
+│
+├── Ru_real.csv
+├── Ru_imag.csv
+├── y_real.csv
+├── y_imag.csv
+├── w_real.csv
+├── w_imag.csv
+├── a_s_real.csv
+└── a_s_imag.csv
+
+One warning: if you're using Vitis HLS 2024.1, std::complex<double> sometimes synthesizes but can consume a lot of resources. For a first C Simulation it is fine because it matches your verified C++ exactly. After we confirm it runs, the next step would be converting to HLS-friendly complex types and then moving on to the QR block.
+
+
+#include <iostream>
+#include "constants.h"
+#include "backsub_top.h"
+
+using namespace std;
+
+int main()
+{
+    static cplx R[N][N];
+    static cplx b[N];
+    static cplx x[N];
+
+    // -------------------------------
+    // Create simple upper triangular R
+    // -------------------------------
+    for(int i = 0; i < N; i++)
+    {
+        for(int j = 0; j < N; j++)
+        {
+            if(i == j)
+                R[i][j] = cplx(2.0, 0.0);   // diagonal = 2
+            else if(j > i)
+                R[i][j] = cplx(1.0, 0.0);   // upper triangle = 1
+            else
+                R[i][j] = cplx(0.0, 0.0);   // lower triangle = 0
+        }
+    }
+
+    // -------------------------------
+    // Known solution:
+    // x_true = [1,1,1,...]
+    // Build b = R*x_true
+    // -------------------------------
+    for(int i = 0; i < N; i++)
+    {
+        double sum = 2.0; // diagonal contribution
+
+        for(int j = i+1; j < N; j++)
+            sum += 1.0;
+
+        b[i] = cplx(sum, 0.0);
+    }
+
+    // -------------------------------
+    // Run DUT
+    // -------------------------------
+    cout << "Running backsub_top()..." << endl;
+
+    backsub_top(R, b, x);
+
+    cout << "Done.\n" << endl;
+
+    // -------------------------------
+    // Verify
+    // -------------------------------
+    double max_err = 0.0;
+
+    cout << "First 10 outputs:\n" << endl;
+
+    for(int i = 0; i < 10; i++)
+    {
+        double err = abs(x[i] - cplx(1.0,0.0));
+
+        if(err > max_err)
+            max_err = err;
+
+        printf(
+            "x[%d] = %.6f + %.6fj\n",
+            i,
+            x[i].real(),
+            x[i].imag()
+        );
+    }
+
+    for(int i = 0; i < N; i++)
+    {
+        double err = abs(x[i] - cplx(1.0,0.0));
+
+        if(err > max_err)
+            max_err = err;
+    }
+
+    cout << "\nMaximum Error = "
+         << max_err << endl;
+
+    if(max_err < 1e-9)
+    {
+        cout << "\nTEST PASSED ✅" << endl;
+        return 0;
+    }
+    else
+    {
+        cout << "\nTEST FAILED ❌" << endl;
+        return 1;
+    }
+}
+
+
+Running backsub_top()...
+Done.
+
+First 10 outputs:
+
+x[0] = 1.000000 + 0.000000j
+x[1] = 1.000000 + 0.000000j
+x[2] = 1.000000 + 0.000000j
+...
+x[9] = 1.000000 + 0.000000j
+
+Maximum Error = 0
+
+TEST PASSED
+
