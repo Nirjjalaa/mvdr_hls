@@ -1,0 +1,376 @@
+Let me give you everything cleanly for Linux.
+
+---
+
+## FILES YOU NEED (3 code files + CSVs)
+
+---
+
+### File 1: `backsub_top.h`
+
+```cpp
+#ifndef BACKSUB_TOP_H
+#define BACKSUB_TOP_H
+
+#include "hls_x_complex.h"
+
+#define N 64
+
+typedef hls::x_complex<float> cplx;
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+```
+
+---
+
+### File 2: `backsub_top.cpp`
+
+```cpp
+#include "backsub_top.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+#pragma HLS INTERFACE m_axi port=R offset=slave bundle=gmem0
+#pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi port=x offset=slave bundle=gmem2
+#pragma HLS INTERFACE s_axilite port=return
+
+    // Local copy of b
+    cplx b_local[N];
+#pragma HLS ARRAY_PARTITION variable=b_local complete
+
+    copy_b:
+    for (int i = 0; i < N; i++) {
+#pragma HLS PIPELINE
+        b_local[i] = b[i];
+    }
+
+    // Back substitution: solve R*x = b
+    outer_loop:
+    for (int i = N-1; i >= 0; i--) {
+
+        cplx sum;
+        sum.real(0.0f);
+        sum.imag(0.0f);
+
+        inner_loop:
+        for (int j = i+1; j < N; j++) {
+#pragma HLS PIPELINE
+            float r_re = R[i][j].real();
+            float r_im = R[i][j].imag();
+            float x_re = x[j].real();
+            float x_im = x[j].imag();
+
+            sum.real( sum.real() + r_re*x_re - r_im*x_im );
+            sum.imag( sum.imag() + r_re*x_im + r_im*x_re );
+        }
+
+        cplx diff;
+        diff.real( b_local[i].real() - sum.real() );
+        diff.imag( b_local[i].imag() - sum.imag() );
+
+        float d_re  = R[i][i].real();
+        float d_im  = R[i][i].imag();
+        float denom = d_re*d_re + d_im*d_im;
+
+        x[i].real( (diff.real()*d_re + diff.imag()*d_im) / denom );
+        x[i].imag( (diff.imag()*d_re - diff.real()*d_im) / denom );
+    }
+}
+```
+
+---
+
+### File 3: `tb_backsub.cpp`
+
+```cpp
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <cmath>
+#include <string>
+#include "backsub_top.h"
+
+using namespace std;
+
+// ===== CHANGE THIS TO YOUR PATH ON LINUX =====
+#define CSV_PATH "/home/USERNAME/mvdr_hls/verify_data/"
+// =============================================
+
+void load_1d(const string& base,
+             float re[], float im[], int size)
+{
+    ifstream fr(base + "_real.csv");
+    ifstream fi(base + "_imag.csv");
+
+    if (!fr.is_open()) {
+        cout << "ERROR: Cannot open " << base << "_real.csv" << endl;
+        exit(1);
+    }
+    if (!fi.is_open()) {
+        cout << "ERROR: Cannot open " << base << "_imag.csv" << endl;
+        exit(1);
+    }
+
+    string lr, li;
+    int i = 0;
+    while (getline(fr, lr) && getline(fi, li) && i < size) {
+        if (lr.empty() || li.empty()) continue;
+        if (!lr.empty() && lr.back()=='\r') lr.pop_back();
+        if (!li.empty() && li.back()=='\r') li.pop_back();
+        re[i] = stof(lr);
+        im[i] = stof(li);
+        i++;
+    }
+    fr.close();
+    fi.close();
+}
+
+void load_2d(const string& base,
+             float re[][N], float im[][N], int rows)
+{
+    ifstream fr(base + "_real.csv");
+    ifstream fi(base + "_imag.csv");
+
+    if (!fr.is_open()) {
+        cout << "ERROR: Cannot open " << base << "_real.csv" << endl;
+        exit(1);
+    }
+    if (!fi.is_open()) {
+        cout << "ERROR: Cannot open " << base << "_imag.csv" << endl;
+        exit(1);
+    }
+
+    string lr, li;
+    int i = 0;
+    while (getline(fr, lr) && getline(fi, li) && i < rows) {
+        if (lr.empty() || li.empty()) continue;
+        if (!lr.empty() && lr.back()=='\r') lr.pop_back();
+        if (!li.empty() && li.back()=='\r') li.pop_back();
+
+        stringstream sr(lr), si(li);
+        string vr, vi;
+        int j = 0;
+        while (getline(sr, vr, ',') &&
+               getline(si, vi, ',') && j < N) {
+            if (!vr.empty() && vr.back()=='\r') vr.pop_back();
+            if (!vi.empty() && vi.back()=='\r') vi.pop_back();
+            re[i][j] = stof(vr);
+            im[i][j] = stof(vi);
+            j++;
+        }
+        i++;
+    }
+    fr.close();
+    fi.close();
+}
+
+int main()
+{
+    cout << "==============================" << endl;
+    cout << "  BACK SUBSTITUTION HLS TB   " << endl;
+    cout << "==============================" << endl;
+
+    string path = CSV_PATH;
+
+    // Load Ru
+    static float Ru_re[N][N], Ru_im[N][N];
+    load_2d(path + "Ru", Ru_re, Ru_im, N);
+    cout << "Ru loaded." << endl;
+
+    // Load y
+    static float y_re[N], y_im[N];
+    load_1d(path + "y", y_re, y_im, N);
+    cout << "y loaded." << endl;
+
+    // Load w (golden reference)
+    static float w_re[N], w_im[N];
+    load_1d(path + "w", w_re, w_im, N);
+    cout << "w_matlab loaded." << endl;
+
+    // Load a_s (for normalization)
+    static float as_re[N], as_im[N];
+    load_1d(path + "a_s", as_re, as_im, N);
+    cout << "a_s loaded." << endl;
+
+    // Build HLS arrays
+    static cplx R_hls[N][N];
+    static cplx b_hls[N];
+    static cplx x_hls[N];
+
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            R_hls[i][j].real(Ru_re[i][j]);
+            R_hls[i][j].imag(Ru_im[i][j]);
+        }
+        b_hls[i].real(y_re[i]);
+        b_hls[i].imag(y_im[i]);
+    }
+
+    // Call HLS top function
+    cout << "\nCalling backsub_top()..." << endl;
+    backsub_top(R_hls, b_hls, x_hls);
+    cout << "Done." << endl;
+
+    // Normalize: x = x / (a_s^H * x)
+    float norm_re = 0, norm_im = 0;
+    for (int i = 0; i < N; i++) {
+        norm_re += as_re[i]*x_hls[i].real()
+                 + as_im[i]*x_hls[i].imag();
+        norm_im += as_re[i]*x_hls[i].imag()
+                 - as_im[i]*x_hls[i].real();
+    }
+    float norm_mag2 = norm_re*norm_re + norm_im*norm_im;
+    for (int i = 0; i < N; i++) {
+        float wr = x_hls[i].real();
+        float wi = x_hls[i].imag();
+        x_hls[i].real((wr*norm_re + wi*norm_im) / norm_mag2);
+        x_hls[i].imag((wi*norm_re - wr*norm_im) / norm_mag2);
+    }
+
+    // Compare with MATLAB golden reference
+    cout << "\nFirst 5 weights comparison:" << endl;
+    cout << "i  | MATLAB               | HLS                  | Error" << endl;
+    cout << "---|---------------------|----------------------|----------" << endl;
+
+    for (int i = 0; i < 5; i++) {
+        float err_r = fabs(x_hls[i].real() - w_re[i]);
+        float err_i = fabs(x_hls[i].imag() - w_im[i]);
+        float err   = sqrt(err_r*err_r + err_i*err_i);
+        printf("%2d | %6.4f + %6.4fj | %6.4f + %6.4fj | %.4e\n",
+            i+1,
+            w_re[i],        w_im[i],
+            x_hls[i].real(), x_hls[i].imag(),
+            err
+        );
+    }
+
+    // Overall relative error
+    double total_err = 0, norm_w = 0;
+    for (int i = 0; i < N; i++) {
+        float dr = x_hls[i].real() - w_re[i];
+        float di = x_hls[i].imag() - w_im[i];
+        total_err += dr*dr + di*di;
+        norm_w    += w_re[i]*w_re[i] + w_im[i]*w_im[i];
+    }
+    double rel_err = sqrt(total_err / norm_w);
+
+    cout << "\n===== RESULT =====" << endl;
+    printf("Relative error = %.6e\n", rel_err);
+
+    if (rel_err < 1e-3) {
+        cout << "BACK SUBSTITUTION HLS: PASS" << endl;
+        return 0;
+    } else {
+        cout << "BACK SUBSTITUTION HLS: FAIL" << endl;
+        return 1;
+    }
+}
+```
+
+---
+
+## COMPLETE STEPS ON LINUX
+
+### Step 1: Source Vitis HLS
+```bash
+source /tools/Xilinx/Vitis_HLS/2024.1/settings64.sh
+```
+
+Confirm it works:
+```bash
+vitis_hls -version
+```
+
+---
+
+### Step 2: Open Vitis HLS GUI
+```bash
+vitis_hls &
+```
+
+---
+
+### Step 3: Create Project
+
+```
+Click "Create Project"
+
+Page 1:
+  Project name : backsub_hls
+  Location     : /home/USERNAME/mvdr_hls/
+  Click Next
+
+Page 2 (Add Source):
+  Click "Add Files"
+  Select backsub_top.cpp
+  Top Function → Browse → select backsub_top
+  Click Next
+
+Page 3 (Add Testbench):
+  Click "Add Files"
+  Select tb_backsub.cpp
+  Click Next
+
+Page 4 (Solution):
+  Clock period : 10
+  Part → "..." → search xcvc1902
+  Select xcvc1902-vsva2197-2MP-e-S
+  Click Finish
+```
+
+---
+
+### Step 4: Run C Simulation
+```
+Top menu → Solution → Run C Simulation → OK
+```
+
+Watch bottom console for:
+```
+BACK SUBSTITUTION HLS: PASS
+```
+
+---
+
+### Step 5: Run C Synthesis
+```
+Top menu → Solution → Run C Synthesis → OK
+```
+
+Wait 2-5 minutes. Then screenshot the report.
+
+---
+
+## What to upload to GitHub tonight:
+
+```
+mvdr_hls/
+├── backsub_hls/
+│   ├── backsub_top.h
+│   ├── backsub_top.cpp
+│   └── tb_backsub.cpp
+└── verify_data/
+    ├── Ru_real.csv
+    ├── Ru_imag.csv
+    ├── y_real.csv
+    ├── y_imag.csv
+    ├── w_real.csv
+    ├── w_imag.csv
+    ├── a_s_real.csv
+    └── a_s_imag.csv
+```
+
+Upload these to GitHub tonight. Tomorrow ask lab instructor to download ZIP and transfer to Linux PC. Then follow the steps above.
+
+Shall I also update the memory with today's progress?
