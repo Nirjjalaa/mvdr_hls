@@ -1,0 +1,549 @@
+Perfect. Once the 4×4 sanity test passes, the next step is to move to your actual algorithm, but still keep it simple.
+
+The progression should be:
+
+4×4 toy example           ✓
+        ↓
+64×64 back substitution   ← NEXT
+        ↓
+MATLAB verification data
+        ↓
+QR decomposition HLS
+        ↓
+Complete MVDR HLS
+
+
+---
+
+Step 2: Real 64×64 Back Substitution
+
+Now we switch back to your actual dimension:
+
+constants.h
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<double> cplx;
+
+#endif
+
+
+---
+
+backsub_top.h
+
+#ifndef BACKSUB_TOP_H
+#define BACKSUB_TOP_H
+
+#include "constants.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+
+---
+
+backsub_top.cpp
+
+This is your verified algorithm with HLS pragmas.
+
+#include "backsub_top.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+#pragma HLS INTERFACE m_axi port=R offset=slave bundle=gmem0
+#pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi port=x offset=slave bundle=gmem2
+#pragma HLS INTERFACE s_axilite port=return
+
+    for(int i=N-1;i>=0;i--)
+    {
+        x[i] = b[i];
+
+        for(int j=i+1;j<N;j++)
+        {
+#pragma HLS PIPELINE
+            x[i] -= R[i][j]*x[j];
+        }
+
+        x[i] /= R[i][i];
+    }
+}
+
+
+---
+
+Testbench for 64×64
+
+The trick is:
+
+We choose a known solution:
+
+x_true = [1,1,1,...,1]
+
+and construct:
+
+b = R*x_true
+
+Then the answer must be exactly:
+
+x = [1,1,1,...,1]
+
+
+---
+
+tb_backsub.cpp
+
+#include <iostream>
+#include <cmath>
+
+#include "backsub_top.h"
+
+using namespace std;
+
+int main()
+{
+    static cplx R[N][N];
+    static cplx b[N];
+    static cplx x[N];
+
+    //---------------------------------
+    // Build upper triangular matrix
+    //---------------------------------
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            if(i==j)
+                R[i][j]=cplx(2.0,0.0);
+
+            else if(j>i)
+                R[i][j]=cplx(1.0,0.0);
+
+            else
+                R[i][j]=cplx(0.0,0.0);
+        }
+    }
+
+    //---------------------------------
+    // Build b=R*xtrue
+    //---------------------------------
+
+    for(int i=0;i<N;i++)
+    {
+        double sum=2.0;
+
+        for(int j=i+1;j<N;j++)
+            sum+=1.0;
+
+        b[i]=cplx(sum,0.0);
+    }
+
+    //---------------------------------
+    // Call DUT
+    //---------------------------------
+
+    backsub_top(R,b,x);
+
+    //---------------------------------
+    // Verify
+    //---------------------------------
+
+    double max_error=0;
+
+    cout<<"\nFirst 10 outputs:\n"<<endl;
+
+    for(int i=0;i<10;i++)
+    {
+        double err=
+            abs(x[i]-cplx(1.0,0.0));
+
+        if(err>max_error)
+            max_error=err;
+
+        cout
+            <<"x["<<i<<"] = "
+            <<x[i].real()
+            <<" + "
+            <<x[i].imag()
+            <<"j"<<endl;
+    }
+
+    for(int i=0;i<N;i++)
+    {
+        double err=
+            abs(x[i]-cplx(1.0,0.0));
+
+        if(err>max_error)
+            max_error=err;
+    }
+
+    cout<<"\nMaximum error = "
+        <<max_error
+        <<endl;
+
+    if(max_error<1e-9)
+    {
+        cout<<"\nTEST PASSED"<<endl;
+        return 0;
+    }
+    else
+    {
+        cout<<"\nTEST FAILED"<<endl;
+        return 1;
+    }
+}
+
+
+---
+
+Expected output
+
+First 10 outputs
+
+x[0] = 1 + 0j
+x[1] = 1 + 0j
+x[2] = 1 + 0j
+...
+x[9] = 1 + 0j
+
+Maximum error = 0
+
+TEST PASSED
+
+
+---
+
+After this passes
+
+Then you are ready for the real verification stage:
+
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+a_s_real.csv
+a_s_imag.csv
+
+which proves:
+
+MATLAB
+    =
+Verified C++
+    =
+HLS
+
+That is the milestone you can put in your internship report before moving to QR decomposition.
+
+
+HOW TO PUT ALL THE CSV FILES
+
+Ah, now I understand. You're not copying an entire folder through the network. Instead, you have to:
+
+GitHub
+   ↓
+Download individual files
+   ↓
+Upload them one by one to the campus network storage
+   ↓
+Access them on the Ubuntu lab PC
+
+In that case, here's the cleanest way to organize everything before you go to the lab.
+
+On your laptop
+
+Create a folder in Explorer:
+
+mvdr_hls
+
+Inside it, create another folder:
+
+verify_data
+
+So you have:
+
+mvdr_hls/
+    verify_data/
+
+
+---
+
+Put your HLS source files here
+
+Create these 4 files using VS Code:
+
+mvdr_hls/
+    constants.h
+    backsub_top.h
+    backsub_top.cpp
+    tb_backsub.cpp
+
+
+---
+
+Put all CSV files here
+
+Download each CSV from GitHub and save them into:
+
+mvdr_hls/verify_data/
+
+For example:
+
+mvdr_hls/
+│
+├── constants.h
+├── backsub_top.h
+├── backsub_top.cpp
+├── tb_backsub.cpp
+│
+└── verify_data/
+      Ru_real.csv
+      Ru_imag.csv
+      Q_real.csv
+      Q_imag.csv
+      y_real.csv
+      y_imag.csv
+      w_real.csv
+      w_imag.csv
+      a_s_real.csv
+      a_s_imag.csv
+      ...
+
+
+---
+
+Upload to campus storage
+
+Then upload:
+
+The 4 code files
+
+constants.h
+backsub_top.h
+backsub_top.cpp
+tb_backsub.cpp
+
+and
+
+Every CSV file from:
+
+verify_data/
+
+one by one.
+
+
+---
+
+On the Ubuntu lab PC
+
+Create:
+
+mkdir -p ~/mvdr_hls/verify_data
+
+Now download the uploaded files from campus storage:
+
+Place code files into:
+
+/home/yourname/mvdr_hls/
+
+and place CSV files into:
+
+/home/yourname/mvdr_hls/verify_data/
+
+So on Linux you finally have:
+
+/home/yourname/mvdr_hls/
+
+    constants.h
+    backsub_top.h
+    backsub_top.cpp
+    tb_backsub.cpp
+
+    verify_data/
+        Ru_real.csv
+        Ru_imag.csv
+        y_real.csv
+        y_imag.csv
+        w_real.csv
+        w_imag.csv
+        a_s_real.csv
+        a_s_imag.csv
+
+
+---
+
+Then in tb_backsub.cpp
+
+Set:
+
+#define CSV_PATH "./verify_data/"
+
+This is actually the easiest method.
+
+The advantage is that you don't need to know:
+
+/home/username
+
+or
+
+/mnt/shared
+
+because:
+
+"./verify_data/"
+
+means:
+
+> "Look for the verify_data folder in the current project directory."
+
+
+
+
+---
+
+My recommendation
+
+Create exactly this structure on your laptop tonight:
+
+mvdr_hls/
+│
+├── constants.h
+├── backsub_top.h
+├── backsub_top.cpp
+├── tb_backsub.cpp
+│
+└── verify_data/
+      all CSV files
+
+Then tomorrow, simply recreate the same structure on the Ubuntu PC and upload the files one by one into the appropriate folders. This is probably the least painful way given your lab restrictions.
+
+
+
+HOW TO ADD PATH TO IT
+
+If you create the folder structure exactly like this:
+
+mvdr_hls/
+│
+├── constants.h
+├── backsub_top.h
+├── backsub_top.cpp
+├── tb_backsub.cpp
+│
+└── verify_data/
+      Ru_real.csv
+      Ru_imag.csv
+      y_real.csv
+      y_imag.csv
+      w_real.csv
+      w_imag.csv
+      a_s_real.csv
+      a_s_imag.csv
+
+then the easiest approach is to put the path in constants.h.
+
+Add this at the bottom of constants.h:
+
+// ================================================
+// CSV PATH
+// ================================================
+#define CSV_PATH "./verify_data/"
+
+
+---
+
+Then in tb_backsub.cpp, use:
+
+string path = CSV_PATH;
+
+and load files like this:
+
+load_csv_2d(path + "Ru_real.csv", Ru_re, N, N);
+load_csv_2d(path + "Ru_imag.csv", Ru_im, N, N);
+
+load_csv_1d(path + "y_real.csv", y_re, N);
+load_csv_1d(path + "y_imag.csv", y_im, N);
+
+load_csv_1d(path + "w_real.csv", w_re, N);
+load_csv_1d(path + "w_imag.csv", w_im, N);
+
+load_csv_1d(path + "a_s_real.csv", as_re, N);
+load_csv_1d(path + "a_s_imag.csv", as_im, N);
+
+
+---
+
+Why ./verify_data/?
+
+The . means:
+
+current project folder
+
+So if Vitis HLS runs from:
+
+/home/student/mvdr_hls/
+
+then:
+
+"./verify_data/"
+
+automatically becomes:
+
+/home/student/mvdr_hls/verify_data/
+
+
+---
+
+Example
+
+Suppose on Ubuntu you have:
+
+/home/student/mvdr_hls/
+    backsub_top.cpp
+    tb_backsub.cpp
+    verify_data/
+        Ru_real.csv
+
+Then:
+
+#define CSV_PATH "./verify_data/"
+
+makes:
+
+path + "Ru_real.csv"
+
+become:
+
+./verify_data/Ru_real.csv
+
+which points to:
+
+/home/student/mvdr_hls/verify_data/Ru_real.csv
+
+
+---
+
+So the short answer is:
+
+Put:
+
+#define CSV_PATH "./verify_data/"
+
+inside constants.h, and nowhere else. This is the most portable solution for your lab setup.
