@@ -824,3 +824,16 @@ a_s_real.csv
 a_s_imag.csv
 
 or do you still need to generate/export them from MATLAB?
+
+My recommendation:
+Follow ChatGPT's structure but use float instead of double:
+Cpp
+
+// In constants.h change this:
+typedef std::complex<double> cplx;
+
+// To this:
+typedef std::complex<float> cplx;
+
+
+Everything else from ChatGPT's version is good to go.
