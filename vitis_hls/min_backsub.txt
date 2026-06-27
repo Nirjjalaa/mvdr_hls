@@ -1,0 +1,292 @@
+Yes. If you're going to use Ubuntu/Linux with Vitis HLS, I would recommend starting from the absolute minimum working example and then gradually moving toward your MVDR project.
+
+The goal of the first experiment is not to verify MVDR, but simply to verify that:
+
+C++ code
+    ↓
+C Simulation
+    ↓
+C Synthesis
+    ↓
+RTL generation
+
+works correctly on your Linux machine.
+
+Step 1: Create a project folder
+
+Open a terminal:
+
+mkdir -p ~/mvdr_hls/backsub_test
+cd ~/mvdr_hls/backsub_test
+
+Create four files:
+
+touch constants.h
+touch backsub_top.h
+touch backsub_top.cpp
+touch tb_backsub.cpp
+
+You can create them using VS Code or any editor.
+
+
+---
+
+Step 2: Create constants.h
+
+For the first test, we use a small matrix size to make debugging easier.
+
+Create:
+
+constants.h
+
+with:
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 4
+
+typedef std::complex<double> cplx;
+
+#endif
+
+
+---
+
+Step 3: Create backsub_top.h
+
+Create:
+
+backsub_top.h
+
+with:
+
+#ifndef BACKSUB_TOP_H
+#define BACKSUB_TOP_H
+
+#include "constants.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+
+---
+
+Step 4: Create backsub_top.cpp
+
+Create:
+
+backsub_top.cpp
+
+with:
+
+#include "backsub_top.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+#pragma HLS INTERFACE m_axi port=R offset=slave bundle=gmem0
+#pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi port=x offset=slave bundle=gmem2
+
+#pragma HLS INTERFACE s_axilite port=return
+
+    for(int i=N-1;i>=0;i--)
+    {
+        x[i] = b[i];
+
+        for(int j=i+1;j<N;j++)
+        {
+#pragma HLS PIPELINE
+            x[i] -= R[i][j]*x[j];
+        }
+
+        x[i] /= R[i][i];
+    }
+}
+
+
+---
+
+Step 5: Create the testbench
+
+Create:
+
+tb_backsub.cpp
+
+with:
+
+#include <iostream>
+#include "backsub_top.h"
+
+using namespace std;
+
+int main()
+{
+    cplx R[N][N];
+    cplx b[N];
+    cplx x[N];
+
+    // Matrix:
+    //
+    // [2 1 1 1]
+    // [0 2 1 1]
+    // [0 0 2 1]
+    // [0 0 0 2]
+    //
+    // True solution:
+    // x=[1 1 1 1]
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            if(i==j)
+                R[i][j]=cplx(2,0);
+
+            else if(j>i)
+                R[i][j]=cplx(1,0);
+
+            else
+                R[i][j]=cplx(0,0);
+        }
+    }
+
+    b[0]=cplx(5,0);
+    b[1]=cplx(4,0);
+    b[2]=cplx(3,0);
+    b[3]=cplx(2,0);
+
+    backsub_top(R,b,x);
+
+    cout << "\nSolution:\n";
+
+    for(int i=0;i<N;i++)
+    {
+        cout
+            << "x[" << i << "] = "
+            << x[i].real()
+            << " + "
+            << x[i].imag()
+            << "j\n";
+    }
+
+    return 0;
+}
+
+
+---
+
+Step 6: Start Vitis HLS
+
+Open terminal:
+
+source /tools/Xilinx/Vitis_HLS/2024.2/settings64.sh
+vitis_hls
+
+(Your lab may have a different installation path.)
+
+
+---
+
+Step 7: Create a project
+
+Create:
+
+Project name:
+backsub_test
+
+Add source files:
+
+backsub_top.cpp
+backsub_top.h
+constants.h
+
+Top function:
+
+backsub_top
+
+Add testbench:
+
+tb_backsub.cpp
+
+Choose your FPGA:
+
+xcvc1902-vsva2197-2MP-e-S
+
+Clock:
+
+10 ns
+
+
+---
+
+Step 8: Run C Simulation
+
+In Vitis:
+
+Solution
+    ↓
+Run C Simulation
+
+Expected output:
+
+Solution:
+
+x[0] = 1
+x[1] = 1
+x[2] = 1
+x[3] = 1
+
+
+---
+
+Step 9: Run C Synthesis
+
+After C simulation passes:
+
+Solution
+    ↓
+Run C Synthesis
+
+
+---
+
+Step 10: Export RTL
+
+After synthesis:
+
+Solution
+    ↓
+Export RTL
+
+Choose:
+
+Verilog
+
+
+---
+
+After this simple 4×4 example works, the next step is:
+
+4×4 example
+      ↓
+64×64 back substitution
+      ↓
+MATLAB verification data
+      ↓
+QR decomposition
+      ↓
+Complete mvdr_top()
+
+I would strongly recommend doing this tiny 4×4 example first on Ubuntu before attempting your full 64×64 MVDR matrices.
