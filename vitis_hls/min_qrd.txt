@@ -1,0 +1,283 @@
+Absolutely. But before I dump hundreds of lines of QRD HLS code, I want to save you from a very common mistake in FPGA projects.
+
+Your project is:
+
+64×64 Complex MVDR
+        ↓
+Complex Givens QRD
+        ↓
+Back Substitution
+        ↓
+Versal FPGA
+
+A full 64×64 complex Givens QRD HLS implementation is not a "next small step". It's the largest block in the entire project and will easily be 300–500 lines of HLS code, plus a testbench and MATLAB verification data.
+
+So the correct progression is:
+
+Step 1
+Backsub HLS
+        ↓
+Step 2
+Small QRD HLS (4×4)
+        ↓
+Step 3
+Verify QRD HLS flow
+        ↓
+Step 4
+Scale to 64×64 QRD
+        ↓
+Step 5
+Combine into MVDR_TOP
+        ↓
+Step 6
+Export IP
+        ↓
+Vivado
+
+
+---
+
+What you should do next
+
+After your backsub C simulation and synthesis pass:
+
+Create a new HLS project
+
+qrd_hls
+
+Create these files:
+
+constants.h
+qrd_top.h
+qrd_top.cpp
+tb_qrd.cpp
+
+
+---
+
+Step 1: constants.h
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 4
+
+typedef std::complex<float> cplx;
+
+#endif
+
+Notice:
+
+N = 4
+
+for initial verification.
+
+
+---
+
+Step 2: qrd_top.h
+
+#ifndef QRD_TOP_H
+#define QRD_TOP_H
+
+#include "constants.h"
+
+void qrd_top(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+);
+
+#endif
+
+
+---
+
+Step 3: qrd_top.cpp
+
+Start with a simple QRD skeleton:
+
+#include <cmath>
+#include "qrd_top.h"
+
+void qrd_top(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+)
+{
+#pragma HLS INTERFACE m_axi port=A bundle=gmem0
+#pragma HLS INTERFACE m_axi port=Q bundle=gmem1
+#pragma HLS INTERFACE m_axi port=R bundle=gmem2
+#pragma HLS INTERFACE s_axilite port=return
+
+    //--------------------------------
+    // Initialize
+    //--------------------------------
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            R[i][j]=A[i][j];
+
+            if(i==j)
+                Q[i][j]=1.0f;
+            else
+                Q[i][j]=0.0f;
+        }
+    }
+
+    //--------------------------------
+    // Givens rotations
+    //--------------------------------
+
+    for(int j=0;j<N;j++)
+    {
+        for(int i=N-1;i>j;i--)
+        {
+            float a=abs(R[i-1][j]);
+            float b=abs(R[i][j]);
+
+            if(b<1e-9)
+                continue;
+
+            float r=sqrt(a*a+b*b);
+
+            float c=a/r;
+            float s=b/r;
+
+            //--------------------------------
+            // Update R
+            //--------------------------------
+
+            for(int k=j;k<N;k++)
+            {
+#pragma HLS PIPELINE
+
+                cplx t1=R[i-1][k];
+                cplx t2=R[i][k];
+
+                R[i-1][k]=c*t1+s*t2;
+                R[i][k]=-s*t1+c*t2;
+            }
+
+            //--------------------------------
+            // Update Q
+            //--------------------------------
+
+            for(int k=0;k<N;k++)
+            {
+#pragma HLS PIPELINE
+
+                cplx t1=Q[k][i-1];
+                cplx t2=Q[k][i];
+
+                Q[k][i-1]=c*t1+s*t2;
+                Q[k][i]=-s*t1+c*t2;
+            }
+        }
+    }
+}
+
+
+---
+
+Step 4: Testbench
+
+#include <iostream>
+#include "qrd_top.h"
+
+using namespace std;
+
+int main()
+{
+    cplx A[N][N];
+    cplx Q[N][N];
+    cplx R[N][N];
+
+    //--------------------------------
+    // Example matrix
+    //--------------------------------
+
+    float M[N][N]={
+        {12,-51,4,1},
+        {6,167,-68,2},
+        {-4,24,-41,3},
+        {1,2,3,4}
+    };
+
+    for(int i=0;i<N;i++)
+        for(int j=0;j<N;j++)
+            A[i][j]=M[i][j];
+
+    qrd_top(A,Q,R);
+
+    cout<<"R matrix:\n"<<endl;
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+            cout<<R[i][j].real()<<" ";
+
+        cout<<endl;
+    }
+
+    return 0;
+}
+
+
+---
+
+Step 5: Create HLS project
+
+Create Project
+        ↓
+Add qrd_top.cpp
+        ↓
+Add qrd_top.h
+        ↓
+Add constants.h
+        ↓
+Top function:
+        qrd_top
+        ↓
+Add tb_qrd.cpp
+        ↓
+Finish
+
+
+---
+
+Step 6: Run
+
+Run C Simulation
+        ↓
+Run C Synthesis
+        ↓
+Export RTL
+
+
+---
+
+Then
+
+After this tiny QRD works:
+
+4×4 QRD
+      ↓
+8×8 QRD
+      ↓
+64×64 QRD
+      ↓
+Use YOUR verified C++ Givens algorithm
+      ↓
+MATLAB verification
+      ↓
+Backsub integration
+      ↓
+MVDR_TOP
+
+I strongly recommend not jumping directly to the full 64×64 complex QRD. Instead, get the HLS flow working with a small QRD first, then port your already verified C++ Givens QRD algorithm almost line-by-line. That's how most FPGA engineers would approach this.
