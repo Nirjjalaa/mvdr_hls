@@ -547,3 +547,280 @@ Put:
 #define CSV_PATH "./verify_data/"
 
 inside constants.h, and nowhere else. This is the most portable solution for your lab setup.
+
+
+THE REMAINING STEPS: 
+
+
+Once you've done:
+
+mvdr_hls/
+│
+├── constants.h
+├── backsub_top.h
+├── backsub_top.cpp
+├── tb_backsub.cpp
+│
+└── verify_data/
+      all CSV files
+
+the next steps on the Ubuntu lab PC are:
+
+
+---
+
+Step 1: Create the same folder structure
+
+Open terminal:
+
+mkdir -p ~/mvdr_hls/verify_data
+
+Upload/copy:
+
+constants.h
+backsub_top.h
+backsub_top.cpp
+tb_backsub.cpp
+
+to:
+
+~/mvdr_hls/
+
+and upload all CSVs to:
+
+~/mvdr_hls/verify_data/
+
+
+---
+
+Step 2: Verify the files exist
+
+cd ~/mvdr_hls
+ls
+
+You should see:
+
+backsub_top.cpp
+backsub_top.h
+constants.h
+tb_backsub.cpp
+verify_data
+
+Then:
+
+cd verify_data
+ls
+
+You should see:
+
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+a_s_real.csv
+a_s_imag.csv
+...
+
+
+---
+
+Step 3: Start Vitis HLS
+
+source /tools/Xilinx/Vitis_HLS/2024.2/settings64.sh
+vitis_hls
+
+(Your lab may have a slightly different installation path.)
+
+
+---
+
+Step 4: Create a new HLS project
+
+In the GUI:
+
+Project name
+
+backsub_hls
+
+
+---
+
+Add source files
+
+Add:
+
+backsub_top.cpp
+backsub_top.h
+constants.h
+
+
+---
+
+Top function
+
+Type:
+
+backsub_top
+
+You do not create another file for the top function. Since your function already exists:
+
+void backsub_top(...)
+
+you simply tell Vitis that this is the top function.
+
+
+---
+
+Add testbench
+
+Add:
+
+tb_backsub.cpp
+
+
+---
+
+Select device
+
+Choose your Versal device, for example:
+
+xcvc1902-vsva2197-2MP-e-S
+
+
+---
+
+Clock period
+
+Set:
+
+10 ns
+
+Finish the project.
+
+
+---
+
+Step 5: Run C Simulation
+
+Go to:
+
+Solution
+    ↓
+Run C Simulation
+
+Expected result:
+
+BACK SUBSTITUTION HLS: PASS
+
+or:
+
+TEST PASSED
+
+depending on your testbench.
+
+
+---
+
+Step 6: If C Simulation fails
+
+Do not run synthesis.
+
+First check:
+
+Did all CSV files load?
+
+Is the path correct?
+
+Did the testbench compile?
+
+Is the numerical error acceptable?
+
+
+
+---
+
+Step 7: Run C Synthesis
+
+If C Simulation passes:
+
+Solution
+    ↓
+Run C Synthesis
+
+Wait for synthesis to complete.
+
+
+---
+
+Step 8: Open synthesis report
+
+Look at:
+
+Latency
+Resources
+DSP
+BRAM
+FF
+LUT
+Clock period
+
+Take screenshots for your internship documentation.
+
+
+---
+
+Step 9: Export RTL
+
+After successful synthesis:
+
+Solution
+    ↓
+Export RTL
+
+Select:
+
+Verilog
+
+or
+
+VHDL
+
+
+---
+
+So your immediate roadmap is:
+
+Prepare files
+      ↓
+Upload to Ubuntu
+      ↓
+Create HLS project
+      ↓
+Select backsub_top as top function
+      ↓
+Run C Simulation
+      ↓
+Get PASS
+      ↓
+Run C Synthesis
+      ↓
+Take screenshots
+      ↓
+Export RTL
+      ↓
+Then start QR decomposition HLS
+
+One more thing: before tomorrow, do you already have the MATLAB-exported files:
+
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+a_s_real.csv
+a_s_imag.csv
+
+or do you still need to generate/export them from MATLAB?
