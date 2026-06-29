@@ -1,0 +1,326 @@
+Tomorrow, do not try to fix the broken workspace. You'll waste a lot of time chasing a tool issue instead of progressing on your project.
+
+Follow this exact plan:
+
+Step 1: Open the WORKING project
+
+Open the HLS project where:
+
+N = 4
+
+successfully completed:
+
+C Simulation ✓
+
+C Synthesis ✓
+
+RTL Export ✓
+
+
+Do not create a new workspace.
+
+
+---
+
+Step 2: Check if standard C++ libraries still work
+
+Open:
+
+#include <iostream>
+#include <complex>
+#include <cmath>
+
+If there are no red underlines, that's a good sign.
+
+
+---
+
+Step 3: Change only one line
+
+In constants.h, change:
+
+#define N 4
+
+to:
+
+#define N 64
+
+Nothing else.
+
+
+---
+
+Step 4: Replace the testbench
+
+Use your 64×64 testbench:
+
+static cplx R[N][N];
+static cplx b[N];
+static cplx x[N];
+
+with the known solution:
+
+x_true = [1,1,1,...]
+b = R*x_true
+
+Do not use CSV files yet.
+
+
+---
+
+Step 5: Run C Simulation
+
+If you get:
+
+TEST PASSED
+
+then we immediately know:
+
+> The second workspace was corrupted.
+
+
+
+
+---
+
+Step 6: Run C Synthesis
+
+If synthesis succeeds:
+
+Latency report
+Resource report
+
+take screenshots.
+
+
+---
+
+Step 7: Only if the old project also breaks
+
+If the old working project suddenly shows:
+
+iostream file not found
+complex file not found
+
+then stop.
+
+That means the Vitis installation/environment itself is broken, and we'll troubleshoot the installation rather than the code.
+
+
+---
+
+Very important
+
+Do not tomorrow:
+
+create a new workspace,
+
+create a new HLS component,
+
+rewrite the code,
+
+switch to Linux,
+
+start QR decomposition.
+
+
+Just do this one experiment:
+
+working N=4 project
+        ↓
+change N to 64
+        ↓
+replace testbench
+        ↓
+run C simulation
+
+This single test will tell us whether we're dealing with:
+
+a workspace problem,
+
+a project problem,
+
+or a Vitis installation problem.
+
+
+My expectation is that the old project will still work, and the second workspace simply got corrupted.
+Not just the N value. Since your 4×4 project is the only known-good project, we want to modify it carefully to isolate the problem.
+
+Step 1: Change constants.h
+
+Change:
+
+#define N 4
+
+to:
+
+#define N 64
+
+Keep everything else exactly the same:
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<double> cplx;
+
+#endif
+
+
+---
+
+Step 2: Replace the testbench
+
+Your old 4×4 testbench probably has:
+
+b[0]=5;
+b[1]=4;
+b[2]=3;
+b[3]=2;
+
+That won't work for N=64.
+
+Replace the entire tb_backsub.cpp with the 64×64 version:
+
+#include <iostream>
+#include <cmath>
+#include "backsub_top.h"
+
+using namespace std;
+
+int main()
+{
+    static cplx R[N][N];
+    static cplx b[N];
+    static cplx x[N];
+
+    // Build upper triangular matrix
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            if(i==j)
+                R[i][j]=cplx(2.0,0.0);
+            else if(j>i)
+                R[i][j]=cplx(1.0,0.0);
+            else
+                R[i][j]=cplx(0.0,0.0);
+        }
+    }
+
+    // Build b = R*x_true
+    // where x_true = [1,1,1,...]
+    for(int i=0;i<N;i++)
+    {
+        double sum=2.0;
+
+        for(int j=i+1;j<N;j++)
+            sum += 1.0;
+
+        b[i]=cplx(sum,0.0);
+    }
+
+    // Run DUT
+    backsub_top(R,b,x);
+
+    // Verify
+    double max_error=0;
+
+    cout << "\nFirst 10 outputs:\n";
+
+    for(int i=0;i<10;i++)
+    {
+        double err = abs(x[i]-cplx(1.0,0.0));
+
+        if(err>max_error)
+            max_error=err;
+
+        cout << "x[" << i << "] = "
+             << x[i].real()
+             << " + "
+             << x[i].imag()
+             << "j\n";
+    }
+
+    for(int i=0;i<N;i++)
+    {
+        double err=abs(x[i]-cplx(1.0,0.0));
+
+        if(err>max_error)
+            max_error=err;
+    }
+
+    cout << "\nMaximum error = "
+         << max_error << endl;
+
+    if(max_error<1e-9)
+    {
+        cout << "\nTEST PASSED\n";
+        return 0;
+    }
+    else
+    {
+        cout << "\nTEST FAILED\n";
+        return 1;
+    }
+}
+
+
+---
+
+Step 3: Do NOT change
+
+Leave these exactly as they were:
+
+backsub_top.cpp
+
+backsub_top.h
+
+Project settings
+
+Top function (backsub_top)
+
+Clock period
+
+FPGA part
+
+
+
+---
+
+Step 4: Run
+
+Run C Simulation
+        ↓
+If PASS
+        ↓
+Run C Synthesis
+
+
+---
+
+If this works:
+
+✅ Your Vitis installation is fine. ✅ Your algorithm is fine. ❌ The second workspace was corrupted.
+
+If this also gives:
+
+iostream file not found
+complex file not found
+
+then we know the problem is with the Vitis environment itself.
+
+So tomorrow's experiment is:
+
+Working 4×4 project
+        ↓
+Change N → 64
+        ↓
+Replace testbench
+        ↓
+Run C Simulation
+
+Nothing else.
