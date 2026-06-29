@@ -1,0 +1,1393 @@
+Yes. Once we've confirmed tomorrow that the N=64 backsub project compiles and synthesizes correctly, the next step is to move from the synthetic testbench to the MATLAB golden-data (CSV) verification.
+
+Here's the exact workflow you should follow.
+
+Phase 1 (Tomorrow Morning)
+
+Verify that Vitis itself works.
+
+Open working N=4 project
+        ↓
+Change N=64
+        ↓
+Replace testbench with 64-element synthetic testbench
+        ↓
+Run C Simulation
+        ↓
+TEST PASSED
+        ↓
+Run C Synthesis
+        ↓
+Take screenshots
+
+If this works, stop. Do not do anything else.
+
+
+---
+
+Phase 2 (CSV Verification)
+
+After the synthetic test passes, we'll verify against MATLAB data.
+
+Your folder structure should look like:
+
+C:\mvdr_hls\
+
+│
+├── source
+│     constants.h
+│     backsub_top.h
+│     backsub_top.cpp
+│
+└── verify_data
+      Ru_real.csv
+      Ru_imag.csv
+      y_real.csv
+      y_imag.csv
+      w_real.csv
+      w_imag.csv
+      a_s_real.csv
+      a_s_imag.csv
+
+
+---
+
+Step 1
+
+Create the folder:
+
+C:\mvdr_hls\
+
+
+---
+
+Step 2
+
+Inside it create:
+
+C:\mvdr_hls\verify_data\
+
+
+---
+
+Step 3
+
+Download these files from Github:
+
+Ru_real.csv
+Ru_imag.csv
+
+y_real.csv
+y_imag.csv
+
+w_real.csv
+w_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+
+
+---
+
+Step 4
+
+Copy all eight files into:
+
+C:\mvdr_hls\verify_data\
+
+using Explorer.
+
+
+---
+
+Step 5
+
+Modify constants.h:
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<float> cplx;
+
+#define CSV_PATH "C:/mvdr_hls/verify_data/"
+
+#endif
+
+
+---
+
+Step 6
+
+Create CSV loader functions.
+
+load_1d()
+
+void load_1d(
+    const std::string& file,
+    float data[],
+    int n)
+{
+    std::ifstream fin(file);
+
+    std::string line;
+    int i=0;
+
+    while(getline(fin,line) && i<n)
+    {
+        data[i]=stof(line);
+        i++;
+    }
+
+    fin.close();
+}
+
+
+---
+
+load_2d()
+
+void load_2d(
+    const std::string& file,
+    float data[][N],
+    int rows)
+{
+    std::ifstream fin(file);
+
+    std::string line;
+
+    int i=0;
+
+    while(getline(fin,line) && i<rows)
+    {
+        std::stringstream ss(line);
+
+        std::string val;
+
+        int j=0;
+
+        while(getline(ss,val,','))
+        {
+            data[i][j]=stof(val);
+            j++;
+        }
+
+        i++;
+    }
+
+    fin.close();
+}
+
+
+---
+
+Step 7
+
+Load Ru:
+
+static float Ru_re[N][N];
+static float Ru_im[N][N];
+
+load_2d(
+    CSV_PATH "Ru_real.csv",
+    Ru_re,
+    N);
+
+load_2d(
+    CSV_PATH "Ru_imag.csv",
+    Ru_im,
+    N);
+
+
+---
+
+Step 8
+
+Load y:
+
+static float y_re[N];
+static float y_im[N];
+
+load_1d(
+    CSV_PATH "y_real.csv",
+    y_re,
+    N);
+
+load_1d(
+    CSV_PATH "y_imag.csv",
+    y_im,
+    N);
+
+
+---
+
+Step 9
+
+Load MATLAB weights:
+
+static float w_re[N];
+static float w_im[N];
+
+load_1d(
+    CSV_PATH "w_real.csv",
+    w_re,
+    N);
+
+load_1d(
+    CSV_PATH "w_imag.csv",
+    w_im,
+    N);
+
+
+---
+
+Step 10
+
+Load steering vector:
+
+static float as_re[N];
+static float as_im[N];
+
+load_1d(
+    CSV_PATH "a_s_real.csv",
+    as_re,
+    N);
+
+load_1d(
+    CSV_PATH "a_s_imag.csv",
+    as_im,
+    N);
+
+
+---
+
+Step 11
+
+Construct complex arrays:
+
+static cplx R[N][N];
+static cplx y[N];
+static cplx x[N];
+
+for(int i=0;i<N;i++)
+{
+    for(int j=0;j<N;j++)
+    {
+        R[i][j]=
+            cplx(
+                Ru_re[i][j],
+                Ru_im[i][j]
+            );
+    }
+
+    y[i]=
+        cplx(
+            y_re[i],
+            y_im[i]
+        );
+}
+
+
+---
+
+Step 12
+
+Run HLS:
+
+backsub_top(
+    R,
+    y,
+    x
+);
+
+
+---
+
+Step 13
+
+Normalize:
+
+cplx norm=0;
+
+for(int i=0;i<N;i++)
+    norm += conj(a_s[i])*x[i];
+
+for(int i=0;i<N;i++)
+    x[i]/=norm;
+
+
+---
+
+Step 14
+
+Compute error:
+
+double err=0;
+double normw=0;
+
+for(int i=0;i<N;i++)
+{
+    err += std::norm(
+        x[i]-w_matlab[i]);
+
+    normw +=
+        std::norm(
+        w_matlab[i]);
+}
+
+err =
+    sqrt(err/normw);
+
+
+---
+
+Step 15
+
+PASS criterion:
+
+if(err<1e-3)
+{
+    cout<<"PASS"<<endl;
+}
+else
+{
+    cout<<"FAIL"<<endl;
+}
+
+
+---
+
+Final workflow
+
+Synthetic testbench
+        ↓
+PASS
+        ↓
+C Synthesis
+        ↓
+PASS
+        ↓
+Replace TB with CSV version
+        ↓
+Copy MATLAB CSV files
+        ↓
+Run C Simulation
+        ↓
+Compare against MATLAB
+        ↓
+PASS
+        ↓
+Backsub HLS verified
+        ↓
+Start QRD HLS
+
+My recommendation is: do not touch the CSV version tomorrow until the synthetic N=64 test passes. That test will tell us whether your environment is healthy before introducing file I/O and MATLAB data.
+
+
+void load_1d(
+const std::string& file,
+float data[],
+int n)
+{
+std::ifstream fin(file);
+
+std::string line;  
+int i=0;  
+
+while(getline(fin,line) && i<n)  
+{  
+    data[i]=stof(line);  
+    i++;  
+}  
+
+fin.close();
+
+}
+Where should I create these...how the hell.i.should do the next steps...tell.me step by step bro ....
+
+I understand the confusion. You're thinking like a software project with many files, but for HLS verification, the easiest way is to put all the CSV loading functions inside the testbench file (tb_backsub.cpp). You do not create separate .cpp or .h files for them.
+
+Let's do this exactly as you would do it after the synthetic test passes.
+
+Folder structure
+
+Create this folder in Windows Explorer:
+
+C:\mvdr_hls\
+
+Inside it create:
+
+C:\mvdr_hls\verify_data\
+
+Then put your CSV files there:
+
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+a_s_real.csv
+a_s_imag.csv
+
+
+---
+
+Your HLS component should contain ONLY these four files
+
+constants.h
+backsub_top.h
+backsub_top.cpp
+tb_backsub.cpp
+
+Nothing else.
+
+
+---
+
+Step 1
+
+Open:
+
+tb_backsub.cpp
+
+
+---
+
+Step 2
+
+At the top, add these includes:
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cmath>
+
+#include "backsub_top.h"
+
+using namespace std;
+
+
+---
+
+Step 3
+
+Immediately below this:
+
+using namespace std;
+
+paste the CSV loader functions.
+
+
+---
+
+Paste this first
+
+void load_1d(
+    const string& file,
+    float data[],
+    int n)
+{
+    ifstream fin(file);
+
+    string line;
+    int i=0;
+
+    while(getline(fin,line) && i<n)
+    {
+        data[i]=stof(line);
+        i++;
+    }
+
+    fin.close();
+}
+
+
+---
+
+Then paste this
+
+void load_2d(
+    const string& file,
+    float data[][N],
+    int rows)
+{
+    ifstream fin(file);
+
+    string line;
+    int i=0;
+
+    while(getline(fin,line) && i<rows)
+    {
+        stringstream ss(line);
+
+        string value;
+        int j=0;
+
+        while(getline(ss,value,','))
+        {
+            data[i][j]=stof(value);
+            j++;
+        }
+
+        i++;
+    }
+
+    fin.close();
+}
+
+
+---
+
+Your tb_backsub.cpp will look like:
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cmath>
+
+#include "backsub_top.h"
+
+using namespace std;
+
+//---------------------------
+// CSV loaders
+//---------------------------
+
+void load_1d(...)
+{
+    ...
+}
+
+void load_2d(...)
+{
+    ...
+}
+
+//---------------------------
+// Main testbench
+//---------------------------
+
+int main()
+{
+    ...
+}
+
+
+---
+
+Step 4
+
+Inside main() create arrays:
+
+static float Ru_re[N][N];
+static float Ru_im[N][N];
+
+static float y_re[N];
+static float y_im[N];
+
+static float w_re[N];
+static float w_im[N];
+
+static float as_re[N];
+static float as_im[N];
+
+
+---
+
+Step 5
+
+Load the CSV files:
+
+load_2d(
+    CSV_PATH "Ru_real.csv",
+    Ru_re,
+    N);
+
+load_2d(
+    CSV_PATH "Ru_imag.csv",
+    Ru_im,
+    N);
+
+load_1d(
+    CSV_PATH "y_real.csv",
+    y_re,
+    N);
+
+load_1d(
+    CSV_PATH "y_imag.csv",
+    y_im,
+    N);
+
+load_1d(
+    CSV_PATH "w_real.csv",
+    w_re,
+    N);
+
+load_1d(
+    CSV_PATH "w_imag.csv",
+    w_im,
+    N);
+
+load_1d(
+    CSV_PATH "a_s_real.csv",
+    as_re,
+    N);
+
+load_1d(
+    CSV_PATH "a_s_imag.csv",
+    as_im,
+    N);
+
+
+---
+
+Step 6
+
+Build the HLS arrays:
+
+static cplx R[N][N];
+static cplx y[N];
+static cplx x[N];
+
+for(int i=0;i<N;i++)
+{
+    for(int j=0;j<N;j++)
+    {
+        R[i][j]=
+            cplx(
+                Ru_re[i][j],
+                Ru_im[i][j]);
+    }
+
+    y[i]=
+        cplx(
+            y_re[i],
+            y_im[i]);
+}
+
+
+---
+
+Step 7
+
+Call the DUT:
+
+backsub_top(
+    R,
+    y,
+    x
+);
+
+
+---
+
+Step 8
+
+Normalize:
+
+cplx norm=0;
+
+for(int i=0;i<N;i++)
+{
+    cplx a(
+        as_re[i],
+        as_im[i]);
+
+    norm += conj(a)*x[i];
+}
+
+for(int i=0;i<N;i++)
+    x[i]/=norm;
+
+
+---
+
+Step 9
+
+Compare with MATLAB:
+
+double err=0;
+double normw=0;
+
+for(int i=0;i<N;i++)
+{
+    cplx wm(
+        w_re[i],
+        w_im[i]);
+
+    err += norm(x[i]-wm);
+
+    normw += norm(wm);
+}
+
+err=sqrt(err/normw);
+
+
+---
+
+Step 10
+
+Print result:
+
+cout << "Relative error = "
+     << err
+     << endl;
+
+
+---
+
+But don't do any of this tomorrow morning.
+
+Tomorrow morning, your task is ONLY:
+
+Open working N=4 project
+        ↓
+Change N=64
+        ↓
+Replace TB with synthetic TB
+        ↓
+Run C Simulation
+        ↓
+Run C Synthesis
+
+Once that succeeds, I'll give you the complete tb_backsub.cpp CSV version as a single copy-paste file, so you won't have to figure out where each piece goes.
+
+Have to sequentially paste this in tb.backsub.h ahh
+...what about backsub_top.h and cpp
+
+
+No. That's the nice part. Only tb_backsub.cpp changes when moving from the synthetic testbench to the CSV testbench.
+
+Your files have different roles:
+
+
+---
+
+1. constants.h
+
+This changes only once.
+
+For synthetic test:
+
+#define N 64
+typedef std::complex<float> cplx;
+
+For CSV test, just add:
+
+#define CSV_PATH "C:/mvdr_hls/verify_data/"
+
+So your final constants.h becomes:
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<float> cplx;
+
+#define CSV_PATH "C:/mvdr_hls/verify_data/"
+
+#endif
+
+After this, you don't touch it.
+
+
+---
+
+2. backsub_top.h
+
+Never changes.
+
+#ifndef BACKSUB_TOP_H
+#define BACKSUB_TOP_H
+
+#include "constants.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+Leave it exactly like this.
+
+
+---
+
+3. backsub_top.cpp
+
+Never changes.
+
+#include "backsub_top.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+#pragma HLS INTERFACE m_axi port=R offset=slave bundle=gmem0
+#pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi port=x offset=slave bundle=gmem2
+#pragma HLS INTERFACE s_axilite port=return
+
+    for(int i=N-1;i>=0;i--)
+    {
+        x[i]=b[i];
+
+        for(int j=i+1;j<N;j++)
+        {
+#pragma HLS PIPELINE
+            x[i]-=R[i][j]*x[j];
+        }
+
+        x[i]/=R[i][i];
+    }
+}
+
+Never touch this again.
+
+
+---
+
+4. tb_backsub.cpp
+
+This is the only file that changes.
+
+Today:
+
+Synthetic testbench
+
+build R
+build b
+call backsub_top
+check x=[1,1,1,...]
+
+
+---
+
+Later:
+
+Replace the ENTIRE file with:
+
+CSV testbench
+
+which does:
+
+load Ru
+load y
+load w
+load a_s
+
+build arrays
+
+call backsub_top
+
+normalize
+
+compare with MATLAB
+
+
+---
+
+So the workflow is:
+
+constants.h      <- modify once
+backsub_top.h    <- never change
+backsub_top.cpp  <- never change
+tb_backsub.cpp   <- replace completely
+
+Do not try to paste CSV loader functions sequentially into your current synthetic testbench.
+
+Instead:
+
+Synthetic TB
+      ↓
+PASS
+      ↓
+Save a copy:
+tb_backsub_synthetic.cpp
+      ↓
+Create a completely new
+tb_backsub.cpp
+for CSV verification
+
+That's how we usually do HLS verification. One DUT (backsub_top), multiple testbenches.
+
+😂 No bro, I explained it like an HLS engineer. Let me explain it like a student doing Vitis for the first time.
+
+You currently have these 4 files:
+
+constants.h
+backsub_top.h
+backsub_top.cpp
+tb_backsub.cpp
+
+Right now, your tb_backsub.cpp contains:
+
+Create R matrix manually
+       ↓
+Create b manually
+       ↓
+Call backsub_top()
+       ↓
+Check if x=[1,1,1,...]
+
+This is called the synthetic testbench.
+
+
+---
+
+Tomorrow, first do:
+
+N=64
+    ↓
+Run C Simulation
+    ↓
+TEST PASSED
+    ↓
+Run C Synthesis
+
+Suppose everything passes.
+
+
+---
+
+Now you want to test with MATLAB CSV data.
+
+At that point, don't edit backsub_top.cpp.
+
+Don't edit backsub_top.h.
+
+Don't edit constants.h (except adding the CSV path once).
+
+The only thing you do is:
+
+Open:
+
+tb_backsub.cpp
+
+Select ALL
+
+Ctrl + A
+
+Delete everything.
+
+Then paste the new CSV testbench that I will give you.
+
+So:
+
+Old tb_backsub.cpp
+------------------
+
+Build R manually
+Build b manually
+Verify x=[1,1,...]
+
+        ↓
+
+Delete everything
+
+        ↓
+
+Paste new tb_backsub.cpp
+
+Load Ru_real.csv
+Load Ru_imag.csv
+Load y_real.csv
+Load y_imag.csv
+Load w_real.csv
+Load w_imag.csv
+Load a_s_real.csv
+Load a_s_imag.csv
+
+Call backsub_top()
+
+Compare with MATLAB
+
+
+---
+
+When I said:
+
+Save a copy:
+tb_backsub_synthetic.cpp
+
+I meant only as a backup.
+
+For example:
+
+tb_backsub.cpp              <- current working testbench
+
+Make a copy in Explorer:
+
+tb_backsub_synthetic.cpp
+
+so that if you mess up later, you still have the old one.
+
+But this backup step is optional.
+
+
+---
+
+So the actual workflow is simply:
+
+Step 1:
+Get synthetic testbench PASS
+
+Step 2:
+Open tb_backsub.cpp
+
+Step 3:
+Ctrl+A
+
+Step 4:
+Delete
+
+Step 5:
+Paste CSV version
+
+Step 6:
+Run C Simulation again
+
+Step 7:
+Compare with MATLAB
+
+That's it.
+
+No new files. No new project. No new workspace. No new component.
+
+
+
+Perfect. Here is the complete tb_backsub.cpp for the CSV verification version. After your synthetic test passes, you can simply replace your existing tb_backsub.cpp with this entire file.
+
+This assumes:
+
+C:/mvdr_hls/verify_data/
+
+contains:
+
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+a_s_real.csv
+a_s_imag.csv
+
+and your constants.h contains:
+
+#define CSV_PATH "C:/mvdr_hls/verify_data/"
+
+
+---
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cmath>
+
+#include "backsub_top.h"
+
+using namespace std;
+
+//=====================================================
+// Load 1D CSV
+//=====================================================
+void load_1d(
+    const string& file,
+    float data[],
+    int n)
+{
+    ifstream fin(file);
+
+    if(!fin.is_open())
+    {
+        cout << "Cannot open "
+             << file << endl;
+        exit(1);
+    }
+
+    string line;
+    int i=0;
+
+    while(getline(fin,line) && i<n)
+    {
+        if(line.empty())
+            continue;
+
+        data[i]=stof(line);
+        i++;
+    }
+
+    fin.close();
+}
+
+//=====================================================
+// Load 2D CSV
+//=====================================================
+void load_2d(
+    const string& file,
+    float data[][N],
+    int rows)
+{
+    ifstream fin(file);
+
+    if(!fin.is_open())
+    {
+        cout << "Cannot open "
+             << file << endl;
+        exit(1);
+    }
+
+    string line;
+    int i=0;
+
+    while(getline(fin,line) && i<rows)
+    {
+        if(line.empty())
+            continue;
+
+        stringstream ss(line);
+
+        string value;
+        int j=0;
+
+        while(getline(ss,value,','))
+        {
+            data[i][j]=stof(value);
+            j++;
+        }
+
+        i++;
+    }
+
+    fin.close();
+}
+
+//=====================================================
+// MAIN TESTBENCH
+//=====================================================
+int main()
+{
+    cout << "\n";
+    cout << "====================================\n";
+    cout << "MVDR BACK SUBSTITUTION HLS TESTBENCH\n";
+    cout << "====================================\n";
+
+    //-------------------------------------------------
+    // Storage
+    //-------------------------------------------------
+
+    static float Ru_re[N][N];
+    static float Ru_im[N][N];
+
+    static float y_re[N];
+    static float y_im[N];
+
+    static float w_re[N];
+    static float w_im[N];
+
+    static float as_re[N];
+    static float as_im[N];
+
+    //-------------------------------------------------
+    // Load CSV files
+    //-------------------------------------------------
+
+    cout << "Loading CSV files...\n";
+
+    load_2d(
+        CSV_PATH "Ru_real.csv",
+        Ru_re,
+        N);
+
+    load_2d(
+        CSV_PATH "Ru_imag.csv",
+        Ru_im,
+        N);
+
+    load_1d(
+        CSV_PATH "y_real.csv",
+        y_re,
+        N);
+
+    load_1d(
+        CSV_PATH "y_imag.csv",
+        y_im,
+        N);
+
+    load_1d(
+        CSV_PATH "w_real.csv",
+        w_re,
+        N);
+
+    load_1d(
+        CSV_PATH "w_imag.csv",
+        w_im,
+        N);
+
+    load_1d(
+        CSV_PATH "a_s_real.csv",
+        as_re,
+        N);
+
+    load_1d(
+        CSV_PATH "a_s_imag.csv",
+        as_im,
+        N);
+
+    cout << "CSV loading complete.\n";
+
+    //-------------------------------------------------
+    // Construct complex arrays
+    //-------------------------------------------------
+
+    static cplx R[N][N];
+    static cplx y[N];
+    static cplx x[N];
+    static cplx w_matlab[N];
+    static cplx a_s[N];
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            R[i][j]=cplx(
+                Ru_re[i][j],
+                Ru_im[i][j]);
+        }
+
+        y[i]=cplx(
+            y_re[i],
+            y_im[i]);
+
+        w_matlab[i]=cplx(
+            w_re[i],
+            w_im[i]);
+
+        a_s[i]=cplx(
+            as_re[i],
+            as_im[i]);
+    }
+
+    //-------------------------------------------------
+    // Run HLS DUT
+    //-------------------------------------------------
+
+    cout << "\nRunning backsub_top()...\n";
+
+    backsub_top(
+        R,
+        y,
+        x);
+
+    cout << "Done.\n";
+
+    //-------------------------------------------------
+    // Normalize
+    //-------------------------------------------------
+
+    cplx norm_factor(0,0);
+
+    for(int i=0;i<N;i++)
+        norm_factor +=
+            conj(a_s[i])*x[i];
+
+    for(int i=0;i<N;i++)
+        x[i] /= norm_factor;
+
+    //-------------------------------------------------
+    // Print first 5 weights
+    //-------------------------------------------------
+
+    cout << "\nFirst 5 weights:\n";
+
+    for(int i=0;i<5;i++)
+    {
+        cout
+        << i
+        << " : MATLAB = "
+        << w_matlab[i]
+        << "    HLS = "
+        << x[i]
+        << endl;
+    }
+
+    //-------------------------------------------------
+    // Relative error
+    //-------------------------------------------------
+
+    double err=0.0;
+    double normw=0.0;
+
+    for(int i=0;i<N;i++)
+    {
+        err += norm(
+            x[i]-w_matlab[i]);
+
+        normw += norm(
+            w_matlab[i]);
+    }
+
+    double rel_err=
+        sqrt(err/normw);
+
+    //-------------------------------------------------
+    // Final result
+    //-------------------------------------------------
+
+    cout << "\n";
+    cout << "Relative Error = "
+         << rel_err
+         << endl;
+
+    if(rel_err < 1e-3)
+    {
+        cout
+        << "\nBACKSUB HLS : PASS\n";
+
+        return 0;
+    }
+    else
+    {
+        cout
+        << "\nBACKSUB HLS : FAIL\n";
+
+        return 1;
+    }
+}
+
+Also change your constants.h to:
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<float> cplx;
+
+#define CSV_PATH "C:/mvdr_hls/verify_data/"
+
+#endif
+
+And keep your existing:
+
+backsub_top.h
+backsub_top.cpp
+
+exactly as they are. No changes needed there.
