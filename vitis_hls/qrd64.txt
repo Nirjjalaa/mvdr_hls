@@ -721,3 +721,412 @@ R error < 1e-3
 QRD verified
 
 One correction to our earlier plan: for the final FPGA project, we'll eventually replace std::complex<float> memory interfaces with a hardware-friendly complex struct or separate real/imag arrays. For now, using std::complex<float> is perfectly fine for algorithm verification in HLS.
+
+
+
+
+
+
+
+
+
+
+
+
+
+Absolutely. For backsub, let's make it exactly the same workflow as QRD:
+
+Synthetic TB
+      ↓
+PASS
+      ↓
+CSV verification
+      ↓
+MATLAB comparison
+      ↓
+PASS
+
+And yes, we'll also fix the std::complex<float> AXI warnings by using ap_memory.
+
+
+---
+
+PART 1 — constants.h
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<float> cplx;
+
+#endif
+
+
+---
+
+PART 2 — backsub_top.h
+
+#ifndef BACKSUB_TOP_H
+#define BACKSUB_TOP_H
+
+#include "constants.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+
+---
+
+PART 3 — backsub_top.cpp
+
+Replace the old AXI interfaces:
+
+#include "backsub_top.h"
+
+void backsub_top(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+#pragma HLS INTERFACE ap_memory port=R
+#pragma HLS INTERFACE ap_memory port=b
+#pragma HLS INTERFACE ap_memory port=x
+
+#pragma HLS INTERFACE s_axilite port=return
+
+    for(int i=N-1;i>=0;i--)
+    {
+        x[i]=b[i];
+
+        for(int j=i+1;j<N;j++)
+        {
+            x[i]-=R[i][j]*x[j];
+        }
+
+        x[i]/=R[i][i];
+    }
+}
+
+Notice:
+
+No m_axi
+
+No pipeline pragma for now
+
+This should remove most of the complex datatype warnings
+
+
+
+---
+
+PART 4 — Create CSV verification TB
+
+Create a new:
+
+tb_backsub.cpp
+
+
+---
+
+Include files
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <cmath>
+
+#include "backsub_top.h"
+
+using namespace std;
+
+
+---
+
+CSV loader
+
+void load_csv_1d(
+    const string& file,
+    float data[],
+    int n)
+{
+    ifstream fin(file);
+
+    string line;
+    int i=0;
+
+    while(getline(fin,line) && i<n)
+    {
+        data[i]=stof(line);
+        i++;
+    }
+
+    fin.close();
+}
+
+
+---
+
+CSV loader for matrices
+
+void load_csv_2d(
+    const string& file,
+    float data[][N],
+    int rows,
+    int cols)
+{
+    ifstream fin(file);
+
+    string value;
+
+    for(int i=0;i<rows;i++)
+    {
+        for(int j=0;j<cols;j++)
+        {
+            getline(fin,value,',');
+
+            if(j==cols-1)
+            {
+                size_t pos=value.find('\n');
+
+                if(pos!=string::npos)
+                    value=value.substr(0,pos);
+            }
+
+            data[i][j]=stof(value);
+        }
+    }
+
+    fin.close();
+}
+
+
+---
+
+Vector error function
+
+float vec_error(
+    cplx a[],
+    cplx b[],
+    int n)
+{
+    double err=0;
+    double normA=0;
+
+    for(int i=0;i<n;i++)
+    {
+        err+=norm(a[i]-b[i]);
+        normA+=norm(a[i]);
+    }
+
+    return sqrt(err)/sqrt(normA);
+}
+
+
+---
+
+PART 5 — Main
+
+int main()
+{
+    static cplx R[N][N];
+    static cplx y[N];
+    static cplx w_cpp[N];
+    static cplx w_matlab[N];
+
+    static float re1d[N];
+    static float im1d[N];
+
+    static float re2d[N][N];
+    static float im2d[N][N];
+
+
+---
+
+Set path
+
+Windows:
+
+string path =
+        "D:/mvdr_data/";
+
+Linux:
+
+string path =
+        "/home/student/mvdr_data/";
+
+
+---
+
+Load Ru matrix
+
+load_csv_2d(
+        path+"Ru_real.csv",
+        re2d,
+        N,
+        N);
+
+    load_csv_2d(
+        path+"Ru_imag.csv",
+        im2d,
+        N,
+        N);
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            R[i][j]=cplx(
+                re2d[i][j],
+                im2d[i][j]);
+        }
+    }
+
+
+---
+
+Load y vector
+
+load_csv_1d(
+        path+"y_real.csv",
+        re1d,
+        N);
+
+    load_csv_1d(
+        path+"y_imag.csv",
+        im1d,
+        N);
+
+    for(int i=0;i<N;i++)
+    {
+        y[i]=cplx(
+            re1d[i],
+            im1d[i]);
+    }
+
+
+---
+
+Load MATLAB weights
+
+load_csv_1d(
+        path+"w_real.csv",
+        re1d,
+        N);
+
+    load_csv_1d(
+        path+"w_imag.csv",
+        im1d,
+        N);
+
+    for(int i=0;i<N;i++)
+    {
+        w_matlab[i]=cplx(
+            re1d[i],
+            im1d[i]);
+    }
+
+
+---
+
+Run DUT
+
+cout
+        << "Running Backsub..."
+        << endl;
+
+    backsub_top(
+        R,
+        y,
+        w_cpp);
+
+    cout
+        << "Done."
+        << endl;
+
+
+---
+
+Compare
+
+float err=
+        vec_error(
+            w_matlab,
+            w_cpp,
+            N);
+
+    cout
+        << "\nWeight error = "
+        << err
+        << endl;
+
+
+---
+
+Print first 5 values
+
+for(int i=0;i<5;i++)
+    {
+        cout
+            << i
+            << " : "
+            << w_cpp[i]
+            << "  "
+            << w_matlab[i]
+            << endl;
+    }
+
+
+---
+
+PASS/FAIL
+
+if(err<1e-3)
+    {
+        cout
+            << "\nTEST PASSED"
+            << endl;
+
+        return 0;
+    }
+    else
+    {
+        cout
+            << "\nTEST FAILED"
+            << endl;
+
+        return 1;
+    }
+}
+
+
+---
+
+Tomorrow's order
+
+1. Open backsub project
+2. Replace m_axi → ap_memory
+3. Run synthesis
+4. Fix remaining warnings
+5. Create CSV TB
+6. Add:
+      Ru_real.csv
+      Ru_imag.csv
+      y_real.csv
+      y_imag.csv
+      w_real.csv
+      w_imag.csv
+7. Run C simulation
+8. Verify:
+      error < 1e-3
+9. Save screenshots
+
+Once backsub CSV verification passes, we'll do the exact same workflow for QRD.
