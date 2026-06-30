@@ -1,0 +1,723 @@
+Yes. We'll do this exactly like we did with backsub: one file at a time. Don't type everything at once.
+
+PART 1 — Create constants.h
+
+Create:
+
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<float> cplx;
+
+#endif
+
+Save it.
+
+
+---
+
+PART 2 — Create qr.h
+
+Create:
+
+#ifndef QR_H
+#define QR_H
+
+#include "constants.h"
+
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+);
+
+#endif
+
+Save it.
+
+
+---
+
+PART 3 — Create qrd_top.cpp
+
+This file only wraps your already verified QRD algorithm.
+
+Create:
+
+#include "qr.h"
+
+void qrd_top(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+)
+{
+#pragma HLS INTERFACE ap_memory port=A
+#pragma HLS INTERFACE ap_memory port=Q
+#pragma HLS INTERFACE ap_memory port=R
+
+#pragma HLS INTERFACE s_axilite port=return
+
+    givens_qr(A,Q,R);
+}
+
+Save it.
+
+
+---
+
+PART 4 — Create qrd_top.h
+
+Create:
+
+#ifndef QRD_TOP_H
+#define QRD_TOP_H
+
+#include "constants.h"
+
+void qrd_top(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+);
+
+#endif
+
+Save it.
+
+
+---
+
+PART 5 — Create qr.cpp
+
+Now paste your verified QRD code here.
+
+Start the file with:
+
+#include "qr.h"
+#include <cmath>
+
+void givens_qr(
+    cplx A[][N],
+    cplx Q[][N],
+    cplx R[][N]
+)
+{
+
+Then paste everything inside your verified QRD function exactly as you already have it:
+
+// Initialize Q=I, R=A
+
+    ...
+
+    // Givens rotations
+
+    ...
+
+    // Update R
+
+    ...
+
+    // Update Q
+
+    ...
+
+and close with:
+
+}
+
+Do not modify the algorithm yet.
+
+
+---
+
+PART 6 — Create a simple testbench first
+
+Create:
+
+tb_qrd.cpp
+
+#include <iostream>
+#include "qrd_top.h"
+
+using namespace std;
+
+int main()
+{
+    static cplx A[N][N];
+    static cplx Q[N][N];
+    static cplx R[N][N];
+
+    //--------------------------------
+    // Identity matrix test
+    //--------------------------------
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            if(i==j)
+                A[i][j]=cplx(1.0f,0.0f);
+            else
+                A[i][j]=cplx(0.0f,0.0f);
+        }
+    }
+
+    cout<<"Running QRD..."<<endl;
+
+    qrd_top(A,Q,R);
+
+    cout<<"Done"<<endl;
+
+    cout<<"\nDiagonal of R:\n"<<endl;
+
+    for(int i=0;i<10;i++)
+    {
+        cout
+            <<"R["<<i<<"]["<<i<<"] = "
+            <<R[i][i].real()
+            <<" + "
+            <<R[i][i].imag()
+            <<"j"
+            <<endl;
+    }
+
+    return 0;
+}
+
+
+---
+
+PART 7 — Add files in Vitis HLS
+
+Add to Sources:
+
+constants.h
+qr.h
+qr.cpp
+qrd_top.h
+qrd_top.cpp
+
+Add to Testbench:
+
+tb_qrd.cpp
+
+Top function:
+
+qrd_top
+
+
+---
+
+PART 8 — Run
+
+Run in order:
+
+Run C Simulation
+       ↓
+If PASS
+       ↓
+Run C Synthesis
+       ↓
+If PASS
+       ↓
+Export RTL
+
+
+---
+
+Stop here.
+
+Do not add CSV files tomorrow initially. First get:
+
+64×64 QRD
+      ↓
+C Simulation PASS
+      ↓
+C Synthesis PASS
+      ↓
+RTL PASS
+
+After that, we'll create the MATLAB CSV verification testbench.
+
+
+
+
+
+
+Yes. That progression was actually the correct approach. Since you have now:
+
+Backsub: C sim ✓, synthesis ✓, RTL ✓
+
+QRD: only tested with a small 4×4 example, no MATLAB verification yet
+
+
+the next step is not Vivado or IP generation.
+
+The next step should be:
+
+Backsub (verified)
+        ✓
+QRD 4×4 HLS flow
+        ✓
+QRD 64×64 HLS
+        ↓
+MATLAB CSV verification
+        ↓
+Backsub + QRD integration
+        ↓
+MVDR_TOP
+        ↓
+Export IP
+        ↓
+Vivado
+
+
+---
+
+Step 1 tomorrow: Fix the std::complex warning issue
+
+Before doing anything else, modify the interface pragmas.
+
+Instead of:
+
+#pragma HLS INTERFACE m_axi port=A bundle=gmem0
+#pragma HLS INTERFACE m_axi port=Q bundle=gmem1
+#pragma HLS INTERFACE m_axi port=R bundle=gmem2
+
+use:
+
+#pragma HLS INTERFACE ap_memory port=A
+#pragma HLS INTERFACE ap_memory port=Q
+#pragma HLS INTERFACE ap_memory port=R
+#pragma HLS INTERFACE s_axilite port=return
+
+Do the same for backsub.
+
+This removes almost all of those "Unsupported access datatype std::complex<float>" warnings.
+
+
+---
+
+Step 2: Create QRD 64×64 project
+
+Create a completely new component:
+
+qrd64_hls
+
+Files:
+
+constants.h
+qr.h
+qrd_top.cpp
+tb_qrd.cpp
+
+
+---
+
+Step 3: Change only one thing
+
+Your verified QRD algorithm already exists:
+
+void givens_qr(cplx A[][N],
+               cplx Q[][N],
+               cplx R[][N])
+{
+   ...
+}
+
+Do not rewrite it.
+
+Simply change:
+
+#define N 4
+
+to:
+
+#define N 64
+
+
+---
+
+Step 4: Create qrd_top.cpp
+
+Literally wrap your verified algorithm:
+
+#include "qr.h"
+
+void qrd_top(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+)
+{
+#pragma HLS INTERFACE ap_memory port=A
+#pragma HLS INTERFACE ap_memory port=Q
+#pragma HLS INTERFACE ap_memory port=R
+#pragma HLS INTERFACE s_axilite port=return
+
+    givens_qr(A,Q,R);
+}
+
+That's all.
+
+
+---
+
+Step 5: Create a synthetic testbench first
+
+Exactly like backsub.
+
+Create:
+
+A = Identity matrix
+
+or
+
+A =
+[12 -51   4   1]
+[ 6 167 -68   2]
+[-4  24 -41   3]
+[ 1   2   3   4]
+
+embedded inside the testbench.
+
+Do NOT use CSV yet.
+
+Goal:
+
+C Simulation
+       PASS
+
+C Synthesis
+       PASS
+
+RTL Export
+       PASS
+
+
+---
+
+Step 6: Only after that use MATLAB CSV
+
+Then create:
+
+tb_qrd_csv.cpp
+
+and load:
+
+R_real.csv
+R_imag.csv
+Q_real.csv
+Q_imag.csv
+Ru_real.csv
+Ru_imag.csv
+
+and compare:
+
+Q_cpp vs Q_matlab
+R_cpp vs R_matlab
+
+using:
+
+relative_error < 1e-3
+
+
+---
+
+So tomorrow's order is:
+
+1. Open backsub project
+2. Replace m_axi with ap_memory
+3. Verify synthesis still works
+4. Create qrd64 project
+5. Paste YOUR verified QRD code
+6. Set N=64
+7. Run C simulation
+8. Run synthesis
+9. Export RTL
+10. THEN add MATLAB CSV verification
+
+Do not jump to Vivado or IP generation yet. For your MVDR workflow, getting QRD64 synthesized and verified against MATLAB is the next major milestone.
+
+
+
+
+
+Perfect. Once your synthetic testbench passes, you create a new CSV verification testbench. Don't mix the synthetic and CSV versions.
+
+Folder structure
+
+Suppose your MATLAB files are here:
+
+D:\mvdr_data\
+    A_real.csv
+    A_imag.csv
+    Q_real.csv
+    Q_imag.csv
+    Ru_real.csv
+    Ru_imag.csv
+
+or on Linux:
+
+/home/student/mvdr_data/
+
+
+---
+
+Step 1: Save your synthetic TB
+
+Rename:
+
+tb_qrd.cpp
+
+to:
+
+tb_qrd_synthetic.cpp
+
+Then create a brand new:
+
+tb_qrd.cpp
+
+
+---
+
+Step 2: Create CSV loading functions
+
+Paste this at the top of tb_qrd.cpp.
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <cmath>
+
+#include "qrd_top.h"
+
+using namespace std;
+
+void load_csv(
+    const string& filename,
+    float data[][N])
+{
+    ifstream file(filename);
+
+    string value;
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            getline(file,value,',');
+
+            if(j==N-1)
+            {
+                size_t pos=value.find('\n');
+                if(pos!=string::npos)
+                    value=value.substr(0,pos);
+            }
+
+            data[i][j]=stof(value);
+        }
+    }
+
+    file.close();
+}
+
+
+---
+
+Step 3: Relative error function
+
+Paste below it.
+
+float matrix_error(
+    cplx A[N][N],
+    cplx B[N][N])
+{
+    double err=0;
+    double normA=0;
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            err+=norm(A[i][j]-B[i][j]);
+            normA+=norm(A[i][j]);
+        }
+    }
+
+    return sqrt(err)/sqrt(normA);
+}
+
+
+---
+
+Step 4: Main testbench
+
+int main()
+{
+    static cplx A[N][N];
+    static cplx Q_cpp[N][N];
+    static cplx R_cpp[N][N];
+
+    static cplx Q_matlab[N][N];
+    static cplx R_matlab[N][N];
+
+    static float re[N][N];
+    static float im[N][N];
+
+
+---
+
+Step 5: Load MATLAB A matrix
+
+Change the path according to your PC.
+
+string path="D:/mvdr_data/";
+
+    load_csv(path+"A_real.csv",re);
+    load_csv(path+"A_imag.csv",im);
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            A[i][j]=cplx(
+                re[i][j],
+                im[i][j]);
+        }
+    }
+
+
+---
+
+Step 6: Load MATLAB Q matrix
+
+load_csv(path+"Q_real.csv",re);
+    load_csv(path+"Q_imag.csv",im);
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            Q_matlab[i][j]=cplx(
+                re[i][j],
+                im[i][j]);
+        }
+    }
+
+
+---
+
+Step 7: Load MATLAB R matrix
+
+For QRD, your MATLAB upper triangular matrix is Ru.
+
+load_csv(path+"Ru_real.csv",re);
+    load_csv(path+"Ru_imag.csv",im);
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            R_matlab[i][j]=cplx(
+                re[i][j],
+                im[i][j]);
+        }
+    }
+
+
+---
+
+Step 8: Run HLS QRD
+
+cout<<"Running QRD..."<<endl;
+
+    qrd_top(
+        A,
+        Q_cpp,
+        R_cpp);
+
+    cout<<"Done."<<endl;
+
+
+---
+
+Step 9: Compare Q
+
+float qerr=
+        matrix_error(
+            Q_matlab,
+            Q_cpp);
+
+    cout
+        <<"\nQ error = "
+        <<qerr
+        <<endl;
+
+
+---
+
+Step 10: Compare R
+
+float rerr=
+        matrix_error(
+            R_matlab,
+            R_cpp);
+
+    cout
+        <<"R error = "
+        <<rerr
+        <<endl;
+
+
+---
+
+Step 11: PASS/FAIL
+
+if(qerr<1e-3 && rerr<1e-3)
+    {
+        cout<<"\nTEST PASSED"<<endl;
+        return 0;
+    }
+    else
+    {
+        cout<<"\nTEST FAILED"<<endl;
+        return 1;
+    }
+}
+
+
+---
+
+Your workflow tomorrow should be:
+
+Synthetic TB
+        ↓
+C Simulation PASS
+        ↓
+C Synthesis PASS
+        ↓
+RTL PASS
+        ↓
+Rename:
+tb_qrd_synthetic.cpp
+        ↓
+Create:
+tb_qrd.cpp
+        ↓
+Copy MATLAB CSV files
+        ↓
+Run CSV verification
+        ↓
+Verify:
+Q error < 1e-3
+R error < 1e-3
+        ↓
+QRD verified
+
+One correction to our earlier plan: for the final FPGA project, we'll eventually replace std::complex<float> memory interfaces with a hardware-friendly complex struct or separate real/imag arrays. For now, using std::complex<float> is perfectly fine for algorithm verification in HLS.
