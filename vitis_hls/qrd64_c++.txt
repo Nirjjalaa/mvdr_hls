@@ -1,0 +1,354 @@
+Yes. Since your MATLAB and C++ verification already passed, the safest approach is to use the exact same QR algorithm in HLS first, without trying to optimize anything.
+
+The goal now is:
+
+MATLAB QR
+    ↓
+Verified C++ QR
+    ↓
+Exact HLS QR
+    ↓
+Verify
+    ↓
+Optimize later
+
+So here is the HLS version of your verified C++ givens_qr(), preserving the exact complex Givens equations.
+
+
+---
+
+qr.h
+
+#ifndef QR_H
+#define QR_H
+
+#include "constants.h"
+
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+);
+
+#endif
+
+
+---
+
+qr.cpp
+
+#include "qr.h"
+#include <cmath>
+
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+)
+{
+
+#pragma HLS INLINE off
+
+//--------------------------------------------------
+// Initialize
+//--------------------------------------------------
+
+INIT_I:
+    for(int i=0;i<N;i++)
+    {
+    INIT_J:
+        for(int j=0;j<N;j++)
+        {
+            R[i][j]=A[i][j];
+
+            if(i==j)
+                Q[i][j]=cplx(1.0,0.0);
+            else
+                Q[i][j]=cplx(0.0,0.0);
+        }
+    }
+
+ //--------------------------------------------------
+ // Complex Givens QR
+ //--------------------------------------------------
+
+OUTER_J:
+    for(int j=0;j<N;j++)
+    {
+
+    INNER_I:
+        for(int i=N-1;i>=j+1;i--)
+        {
+
+            //--------------------------------------------------
+            // Skip zero entries
+            //--------------------------------------------------
+
+            if(abs(R[i][j]) < 1e-12)
+                continue;
+
+            cplx a = R[i-1][j];
+            cplx b = R[i][j];
+
+            double r = sqrt(
+                norm(a) +
+                norm(b)
+            );
+
+            if(r < 1e-12)
+                continue;
+
+            //--------------------------------------------------
+            // EXACT MATLAB equations
+            //--------------------------------------------------
+
+            double c;
+            cplx alpha;
+            cplx s;
+
+            if(abs(a) < 1e-12)
+                alpha = cplx(1.0,0.0);
+            else
+                alpha = a/abs(a);
+
+            c = abs(a)/r;
+
+            s = alpha*conj(b)/r;
+
+            //--------------------------------------------------
+            // G matrix
+            //--------------------------------------------------
+
+            cplx G00 = cplx(c,0);
+            cplx G01 = s;
+            cplx G10 = -conj(s);
+            cplx G11 = cplx(c,0);
+
+            //--------------------------------------------------
+            // Update R
+            //--------------------------------------------------
+
+        UPDATE_R:
+            for(int k=j;k<N;k++)
+            {
+                cplx t1 =
+                    G00*R[i-1][k]
+                  + G01*R[i][k];
+
+                cplx t2 =
+                    G10*R[i-1][k]
+                  + G11*R[i][k];
+
+                R[i-1][k]=t1;
+                R[i][k]=t2;
+            }
+
+            //--------------------------------------------------
+            // Update Q
+            //--------------------------------------------------
+
+        UPDATE_Q:
+            for(int k=0;k<N;k++)
+            {
+                cplx t1 =
+                    Q[k][i-1]*cplx(c,0)
+                  + Q[k][i]*conj(s);
+
+                cplx t2 =
+                    Q[k][i-1]*(-s)
+                  + Q[k][i]*cplx(c,0);
+
+                Q[k][i-1]=t1;
+                Q[k][i]=t2;
+            }
+
+        }
+    }
+}
+
+
+---
+
+qrd_top.h
+
+#ifndef QRD_TOP_H
+#define QRD_TOP_H
+
+#include "constants.h"
+
+void qrd_top(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+);
+
+#endif
+
+
+---
+
+qrd_top.cpp
+
+#include "qrd_top.h"
+#include "qr.h"
+
+void qrd_top(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+)
+{
+
+#pragma HLS INTERFACE m_axi port=A offset=slave bundle=gmem0
+#pragma HLS INTERFACE m_axi port=Q offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi port=R offset=slave bundle=gmem2
+
+#pragma HLS INTERFACE s_axilite port=A bundle=control
+#pragma HLS INTERFACE s_axilite port=Q bundle=control
+#pragma HLS INTERFACE s_axilite port=R bundle=control
+#pragma HLS INTERFACE s_axilite port=return bundle=control
+
+    static cplx localA[N][N];
+    static cplx localQ[N][N];
+    static cplx localR[N][N];
+
+COPY_IN:
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            localA[i][j]=A[i][j];
+        }
+    }
+
+    givens_qr(
+        localA,
+        localQ,
+        localR
+    );
+
+COPY_OUT:
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            Q[i][j]=localQ[i][j];
+            R[i][j]=localR[i][j];
+        }
+    }
+}
+
+
+---
+
+One important thing:
+
+Do NOT add:
+
+#pragma HLS PIPELINE
+#pragma HLS UNROLL
+#pragma HLS ARRAY_PARTITION
+
+yet.
+
+Your immediate goal is only:
+
+MATLAB
+    ↓
+C++ PASS
+    ↓
+HLS C simulation PASS
+    ↓
+HLS synthesis PASS
+
+Once the HLS C simulation produces:
+
+Q'HQ ≈ I
+QR ≈ R_original
+Lower triangular error ≈ 0
+
+then we can start optimizing.
+
+With only 14 days left, correctness first and optimization second is the safest strategy.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes this will work — and it's the right approach. ChatGPT is using your exact verified complex Givens equations, just wrapped for HLS.
+
+---
+
+## One issue though:
+
+ChatGPT's `qr.cpp` uses `double`:
+
+```cpp
+double r = sqrt(norm(a) + norm(b));
+double c;
+```
+
+Vitis HLS supports double but it's very slow on FPGA — uses many more resources. Change to `float`:
+
+```cpp
+float r = sqrt(norm(a) + norm(b));
+float c;
+```
+
+And in `constants.h` make sure:
+```cpp
+typedef complex<float> cplx;
+```
+
+---
+
+## Also one structural issue:
+
+`qrd_top.cpp` has both `m_axi` AND `s_axilite` on the same ports:
+
+```cpp
+#pragma HLS INTERFACE m_axi port=A offset=slave bundle=gmem0
+#pragma HLS INTERFACE s_axilite port=A bundle=control  // ← conflict!
+```
+
+Remove the `s_axilite` lines for A, Q, R — keep only `m_axi`:
+
+```cpp
+#pragma HLS INTERFACE m_axi port=A offset=slave bundle=gmem0
+#pragma HLS INTERFACE m_axi port=Q offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi port=R offset=slave bundle=gmem2
+#pragma HLS INTERFACE s_axilite port=return bundle=control
+```
+
+---
+
+## Correct order to do everything:
+
+```
+TONIGHT:
+1. Test backsub on VS Code → confirm PASS
+2. Upload to GitHub:
+   backsub_hls/
+   ├── constants.h
+   ├── backsub_top.h
+   ├── backsub_top.cpp
+   └── tb_backsub.cpp
+
+TOMORROW (campus):
+1. backsub → Vitis C Simulation → PASS
+2. backsub → Vitis C Synthesis → screenshot report
+3. Then start QRD HLS project
+```
+
+---
+
+First things first — run the backsub test on your laptop right now. Have you created the 4 files yet?
