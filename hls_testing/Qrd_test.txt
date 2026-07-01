@@ -1,0 +1,200 @@
+Yes. For the first isolated HLS verification of QR decomposition, you also do not need your full constants.h.
+
+Create a completely standalone QR HLS project with just two files.
+
+qr.h
+
+#ifndef QR_H
+#define QR_H
+
+#include <hls_complex.h>
+#include <math.h>
+
+#define N 64
+
+typedef hls::complex<double> cplx;
+
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+);
+
+#endif
+
+
+---
+
+qr.cpp
+
+#include "qr.h"
+
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+)
+{
+    // Initialize
+INIT:
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+#pragma HLS PIPELINE II=1
+            R[i][j] = A[i][j];
+
+            if(i==j)
+                Q[i][j] = cplx(1.0,0.0);
+            else
+                Q[i][j] = cplx(0.0,0.0);
+        }
+    }
+
+COL_LOOP:
+    for(int j=0;j<N;j++)
+    {
+    ROW_LOOP:
+        for(int i=N-1;i>=j+1;i--)
+        {
+            if(abs(R[i][j]) < 1e-12)
+                continue;
+
+            cplx a = R[i-1][j];
+            cplx b = R[i][j];
+
+            double r = sqrt(
+                a.real()*a.real() +
+                a.imag()*a.imag() +
+                b.real()*b.real() +
+                b.imag()*b.imag()
+            );
+
+            double c;
+            cplx alpha;
+            cplx s;
+
+            if(abs(a) < 1e-12)
+                alpha = cplx(1.0,0.0);
+            else
+                alpha = a/abs(a);
+
+            c = abs(a)/r;
+            s = alpha*conj(b)/r;
+
+        APPLY_R:
+            for(int k=j;k<N;k++)
+            {
+#pragma HLS PIPELINE II=1
+
+                cplx tmp1 =
+                    cplx(c,0)*R[i-1][k]
+                    + s*R[i][k];
+
+                cplx tmp2 =
+                    -conj(s)*R[i-1][k]
+                    + cplx(c,0)*R[i][k];
+
+                R[i-1][k] = tmp1;
+                R[i][k]   = tmp2;
+            }
+
+        APPLY_Q:
+            for(int k=0;k<N;k++)
+            {
+#pragma HLS PIPELINE II=1
+
+                cplx tmp1 =
+                    Q[k][i-1]*cplx(c,0)
+                    + Q[k][i]*conj(s);
+
+                cplx tmp2 =
+                    -Q[k][i-1]*s
+                    + Q[k][i]*cplx(c,0);
+
+                Q[k][i-1] = tmp1;
+                Q[k][i]   = tmp2;
+            }
+        }
+    }
+}
+
+
+---
+
+Minimal HLS testbench (tb_qr.cpp)
+
+#include <iostream>
+#include "qr.h"
+
+using namespace std;
+
+int main()
+{
+    cplx A[N][N];
+    cplx Q[N][N];
+    cplx R[N][N];
+
+    // Simple Hermitian matrix
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            if(i==j)
+                A[i][j] = cplx(10,0);
+            else
+                A[i][j] = cplx(1,0);
+        }
+    }
+
+    givens_qr(A,Q,R);
+
+    cout<<"R(0,0) = "<<R[0][0]<<endl;
+    cout<<"R(1,0) = "<<R[1][0]<<endl;
+    cout<<"R(2,0) = "<<R[2][0]<<endl;
+
+    return 0;
+}
+
+
+---
+
+So your first two HLS projects become:
+
+mvdr_backsub/
+    backsub.h
+    backsub.cpp
+    tb_backsub.cpp
+
+mvdr_qr/
+    qr.h
+    qr.cpp
+    tb_qr.cpp
+
+No need for:
+
+constants.h
+
+matrix.cpp
+
+steering_vec.cpp
+
+CSV files
+
+MATLAB data
+
+
+The goal of these first HLS projects is simply:
+
+✅ C simulation passes
+✅ C synthesis completes
+✅ RTL is generated
+
+After that, we'll move to the MATLAB-verified QR and backsub testbenches using your golden CSV data.
+
+
+
+
+
+
+
