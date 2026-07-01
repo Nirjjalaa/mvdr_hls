@@ -1,0 +1,318 @@
+Yes. Since your MATLAB ↔ C++ verification is already complete, we do not need to verify the desktop C++ again. The goal now is:
+
+> Take each verified C++ block and make it synthesizable in Vitis HLS.
+
+
+
+And your plan of doing:
+
+1. Back substitution
+
+
+2. QR decomposition
+
+
+3. Steering vector
+
+
+4. Matrix operations
+
+
+5. Final mvdr_top
+
+
+
+is a good approach.
+
+What we'll do for each block
+
+For every module:
+
+Step 1
+
+Take your verified C++ code.
+
+Step 2
+
+Modify it for HLS:
+
+remove std::complex
+
+remove dynamic memory
+
+use fixed arrays
+
+add HLS pragmas
+
+
+Step 3
+
+Create a small HLS testbench.
+
+Step 4
+
+Run:
+
+C Simulation
+
+C Synthesis
+
+RTL export
+
+
+Step 5
+
+Compare with your MATLAB golden outputs.
+
+
+---
+
+Module 1: Back Substitution
+
+Your current code:
+
+void back_substitution(cplx R[][N], cplx b[], cplx x[])
+{
+    for (int i = N-1; i >= 0; i--) {
+        x[i] = b[i];
+        for (int j = i+1; j < N; j++)
+            x[i] -= R[i][j] * x[j];
+        x[i] /= R[i][i];
+    }
+}
+
+is already almost HLS-compatible.
+
+The only issue is:
+
+typedef complex<double> cplx;
+
+because Vitis HLS prefers:
+
+#include <hls_complex.h>
+
+typedef hls::complex<double> cplx;
+
+
+---
+
+HLS version of backsub.h
+
+#ifndef BACKSUB_H
+#define BACKSUB_H
+
+#include <hls_complex.h>
+
+#define N 64
+
+typedef hls::complex<double> cplx;
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+
+---
+
+HLS version of backsub.cpp
+
+#include "backsub.h"
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+#pragma HLS INLINE off
+
+BACKSUB_OUTER:
+    for(int i=N-1;i>=0;i--)
+    {
+        cplx sum = b[i];
+
+BACKSUB_INNER:
+        for(int j=i+1;j<N;j++)
+        {
+#pragma HLS PIPELINE II=1
+            sum -= R[i][j]*x[j];
+        }
+
+        x[i] = sum/R[i][i];
+    }
+}
+
+
+---
+
+HLS testbench
+
+Create:
+
+tb_backsub.cpp
+
+#include <iostream>
+#include "backsub.h"
+
+using namespace std;
+
+int main()
+{
+    cplx R[N][N];
+    cplx b[N];
+    cplx x[N];
+
+    for(int i=0;i<N;i++)
+    {
+        b[i]=1.0;
+
+        for(int j=0;j<N;j++)
+        {
+            if(i==j)
+                R[i][j]=1.0;
+            else
+                R[i][j]=0.0;
+        }
+    }
+
+    back_substitution(R,b,x);
+
+    for(int i=0;i<5;i++)
+        cout<<x[i]<<endl;
+
+    return 0;
+}
+
+
+---
+
+In Vitis HLS
+
+Create project:
+
+mvdr_backsub
+
+Add:
+
+backsub.cpp
+backsub.h
+
+Top function:
+
+back_substitution
+
+Testbench:
+
+tb_backsub.cpp
+
+Then run:
+
+C Simulation
+
+If it passes, we'll move to the much bigger block:
+
+> Givens QR decomposition (givens_qr)
+
+
+
+which is the core of your FPGA MVDR beamformer.
+
+
+
+
+
+Yes, for the first isolated HLS verification of back_substitution, you do not need your entire constants.h.
+
+You can make the HLS project completely standalone with just:
+
+#ifndef BACKSUB_H
+#define BACKSUB_H
+
+#include <hls_complex.h>
+
+#define N 64
+
+typedef hls::complex<double> cplx;
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+and:
+
+#include "backsub.h"
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+BACKSUB_OUTER:
+    for(int i=N-1;i>=0;i--)
+    {
+        cplx sum = b[i];
+
+BACKSUB_INNER:
+        for(int j=i+1;j<N;j++)
+        {
+#pragma HLS PIPELINE II=1
+            sum -= R[i][j]*x[j];
+        }
+
+        x[i] = sum / R[i][i];
+    }
+}
+
+For this first HLS experiment, the files are:
+
+mvdr_backsub/
+    backsub.h
+    backsub.cpp
+    tb_backsub.cpp
+
+No need for:
+
+constants.h
+
+matrix.cpp
+
+matrix.h
+
+steering_vec.cpp
+
+steering_vec.h
+
+qr.cpp
+
+qr.h
+
+MATLAB CSV loaders
+
+
+
+---
+
+However, once we build the full MVDR HLS pipeline, we'll reintroduce a simplified constants.h containing things like:
+
+#define NX 8
+#define NY 8
+#define N 64
+#define K 5000
+
+typedef hls::complex<double> cplx;
+
+For now, keeping each HLS block independent is the right approach.
+
+
+
+
+  
