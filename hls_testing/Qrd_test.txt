@@ -198,3 +198,387 @@ After that, we'll move to the MATLAB-verified QR and backsub testbenches using y
 
 
 
+
+
+
+
+
+
+
+For isolated Givens QRD verification in Vitis HLS, you only need the CSV files that were used in your C++ verification of Stage 3.
+
+CSV files required for QRD HLS verification
+
+R_real.csv
+R_imag.csv
+
+Q_real.csv
+Q_imag.csv
+
+Ru_real.csv
+Ru_imag.csv
+
+What each file is used for
+
+File	Purpose
+
+R_real.csv	Real part of input covariance matrix R
+R_imag.csv	Imaginary part of input covariance matrix R
+Q_real.csv	MATLAB golden Q matrix
+Q_imag.csv	MATLAB golden Q matrix
+Ru_real.csv	MATLAB golden upper triangular matrix
+Ru_imag.csv	MATLAB golden upper triangular matrix
+
+
+
+---
+
+Folder structure
+
+Create a folder:
+
+C:\mvdr_hls\qrd_hls\
+
+Place inside:
+
+qrd.cpp
+qrd.h
+constants.h
+qrd_tb.cpp
+
+R_real.csv
+R_imag.csv
+Q_real.csv
+Q_imag.csv
+Ru_real.csv
+Ru_imag.csv
+
+
+---
+
+While creating the Vitis HLS project
+
+Design files:
+
+qr.cpp
+qr.h
+constants.h
+
+Top function:
+
+givens_qr
+
+Testbench files:
+
+qrd_tb.cpp
+
+R_real.csv
+R_imag.csv
+
+Q_real.csv
+Q_imag.csv
+
+Ru_real.csv
+Ru_imag.csv
+
+
+---
+
+What the testbench will do
+
+Load R from CSV
+          ↓
+Run HLS givens_qr()
+          ↓
+Produce Q_cpp and Ru_cpp
+          ↓
+Compare with MATLAB Q and Ru
+          ↓
+Compute:
+
+• lower triangular error
+• orthogonality error
+• reconstruction error
+• diagonal match error
+          ↓
+PASS/FAIL
+
+
+---
+
+Summary of isolated HLS verification order
+
+Step	Top function	CSV files needed
+
+1	back_substitution	Ru, y, w
+2	givens_qr	R, Q, Ru
+3	steering_vec	none or small golden values
+4	covariance	Xtrain, R
+5	mvdr_top	all required files
+
+
+This is a good order because back substitution is the easiest kernel, QRD is the hardest kernel, and once QRD passes in HLS, the remaining MVDR pipeline is much more straightforward.
+
+
+
+
+
+
+
+
+
+
+Perfect. Since your C++ QRD is already verified, for the first Vitis HLS verification we only need a testbench (qrd_tb.cpp) that:
+
+1. Loads the MATLAB golden CSV files.
+
+
+2. Calls your givens_qr() function.
+
+
+3. Computes the same verification metrics you used in VS Code.
+
+
+4. Prints PASS/FAIL.
+
+
+
+You can keep your existing qr.cpp and qr.h unchanged for this first HLS test.
+
+qrd_tb.cpp
+
+#include <iostream>
+#include <fstream>
+#include <complex>
+#include <cmath>
+
+#define N 64
+
+typedef std::complex<double> cplx;
+
+void givens_qr(cplx A[][N], cplx Q[][N], cplx R[][N]);
+
+// ===================================================
+// CSV LOADER
+// ===================================================
+void load_csv(const char* fname, double M[N][N])
+{
+    std::ifstream f(fname);
+
+    for(int i=0;i<N;i++)
+        for(int j=0;j<N;j++)
+        {
+            char comma;
+            f >> M[i][j];
+            if(f.peek()==',')
+                f >> comma;
+        }
+
+    f.close();
+}
+
+// ===================================================
+// TESTBENCH
+// ===================================================
+int main()
+{
+    double re[N][N];
+    double im[N][N];
+
+    cplx R_matlab[N][N];
+    cplx Q_matlab[N][N];
+    cplx Ru_matlab[N][N];
+
+    // ==========================================
+    // LOAD R
+    // ==========================================
+    load_csv("R_real.csv",re);
+    load_csv("R_imag.csv",im);
+
+    for(int i=0;i<N;i++)
+        for(int j=0;j<N;j++)
+            R_matlab[i][j]=cplx(re[i][j],im[i][j]);
+
+    // ==========================================
+    // LOAD Q
+    // ==========================================
+    load_csv("Q_real.csv",re);
+    load_csv("Q_imag.csv",im);
+
+    for(int i=0;i<N;i++)
+        for(int j=0;j<N;j++)
+            Q_matlab[i][j]=cplx(re[i][j],im[i][j]);
+
+    // ==========================================
+    // LOAD Ru
+    // ==========================================
+    load_csv("Ru_real.csv",re);
+    load_csv("Ru_imag.csv",im);
+
+    for(int i=0;i<N;i++)
+        for(int j=0;j<N;j++)
+            Ru_matlab[i][j]=cplx(re[i][j],im[i][j]);
+
+    // ==========================================
+    // RUN HLS QRD
+    // ==========================================
+    cplx Q_cpp[N][N];
+    cplx Ru_cpp[N][N];
+
+    givens_qr(R_matlab,Q_cpp,Ru_cpp);
+
+    std::cout
+        << "\n===== HLS QR DECOMPOSITION =====\n";
+
+    // ==========================================
+    // CHECK 1
+    // ==========================================
+    double lower_err=0;
+
+    for(int i=0;i<N;i++)
+        for(int j=0;j<i;j++)
+            lower_err+=std::abs(Ru_cpp[i][j]);
+
+    lower_err/=(N*N);
+
+    std::cout
+        << "Lower triangular error : "
+        << lower_err << "\n";
+
+    // ==========================================
+    // CHECK 2
+    // ==========================================
+    double orth_err=0;
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            cplx sum=0;
+
+            for(int k=0;k<N;k++)
+                sum+=std::conj(Q_cpp[k][i])
+                     *Q_cpp[k][j];
+
+            cplx expected=
+                (i==j)?
+                cplx(1,0):
+                cplx(0,0);
+
+            orth_err+=
+                std::abs(sum-expected);
+        }
+    }
+
+    orth_err/=(N*N);
+
+    std::cout
+        << "Orthogonality error    : "
+        << orth_err << "\n";
+
+    // ==========================================
+    // CHECK 3
+    // ==========================================
+    double recon_err=0;
+    double norm_R=0;
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            cplx sum=0;
+
+            for(int k=0;k<N;k++)
+                sum+=Q_cpp[i][k]
+                    *Ru_cpp[k][j];
+
+            recon_err+=
+                std::norm(
+                    sum-R_matlab[i][j]);
+
+            norm_R+=
+                std::norm(
+                    R_matlab[i][j]);
+        }
+    }
+
+    recon_err=
+        sqrt(recon_err)
+       /sqrt(norm_R);
+
+    std::cout
+        << "Reconstruction error  : "
+        << recon_err << "\n";
+
+    // ==========================================
+    // CHECK 4
+    // ==========================================
+    double diag_err=0;
+
+    for(int i=0;i<N;i++)
+        diag_err+=
+            std::abs(
+                std::abs(
+                    Ru_cpp[i][i])
+                -
+                std::abs(
+                    Ru_matlab[i][i]));
+
+    diag_err/=N;
+
+    std::cout
+        << "Diagonal match error  : "
+        << diag_err << "\n";
+
+    // ==========================================
+    // PASS FAIL
+    // ==========================================
+    if(lower_err<1e-6 &&
+       orth_err<1e-6 &&
+       recon_err<1e-6)
+    {
+        std::cout
+            << "\nQRD HLS TEST : PASS\n";
+    }
+    else
+    {
+        std::cout
+            << "\nQRD HLS TEST : FAIL\n";
+    }
+
+    return 0;
+}
+
+Files to add in the Vitis HLS project
+
+Design files:
+
+qr.cpp
+qr.h
+
+Testbench files:
+
+qrd_tb.cpp
+
+R_real.csv
+R_imag.csv
+
+Q_real.csv
+Q_imag.csv
+
+Ru_real.csv
+Ru_imag.csv
+
+Top function:
+
+givens_qr
+
+Before moving to QRD though, I still recommend doing back_substitution first, because if your HLS environment setup has any issue, you'll discover it on a 20-line kernel instead of on the 300+ line Givens QRD kernel.
+
+
+
+
+
+
+
+
