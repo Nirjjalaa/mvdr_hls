@@ -315,4 +315,367 @@ For now, keeping each HLS block independent is the right approach.
 
 
 
+
+Yes, doing both QR + Backsub with all CSV loading code in one message will be huge and hard to copy correctly. Let's do it properly, one block at a time.
+
+We'll start with Back Substitution HLS verification using your MATLAB golden CSVs (Ru_real.csv, Ru_imag.csv, y_real.csv, y_imag.csv, w_real.csv, w_imag.csv).
+
+File 1: backsub.h
+
+#ifndef BACKSUB_H
+#define BACKSUB_H
+
+#include <hls_complex.h>
+
+#define N 64
+
+typedef hls::complex<double> cplx;
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+
+---
+
+File 2: backsub.cpp
+
+#include "backsub.h"
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+BACKSUB_OUTER:
+    for(int i=N-1;i>=0;i--)
+    {
+        cplx sum = b[i];
+
+BACKSUB_INNER:
+        for(int j=i+1;j<N;j++)
+        {
+#pragma HLS PIPELINE II=1
+            sum -= R[i][j]*x[j];
+        }
+
+        x[i] = sum/R[i][i];
+    }
+}
+
+
+---
+
+File 3: tb_backsub.cpp
+
+Put this entire file as your Vitis HLS testbench.
+
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include "backsub.h"
+
+using namespace std;
+
+void load_matrix(
+    const char* realfile,
+    const char* imagfile,
+    cplx A[N][N]
+)
+{
+    ifstream fr(realfile);
+    ifstream fi(imagfile);
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            double re,im;
+            fr >> re;
+            fi >> im;
+            A[i][j]=cplx(re,im);
+        }
+    }
+
+    fr.close();
+    fi.close();
+}
+
+void load_vector(
+    const char* realfile,
+    const char* imagfile,
+    cplx x[N]
+)
+{
+    ifstream fr(realfile);
+    ifstream fi(imagfile);
+
+    for(int i=0;i<N;i++)
+    {
+        double re,im;
+        fr >> re;
+        fi >> im;
+        x[i]=cplx(re,im);
+    }
+
+    fr.close();
+    fi.close();
+}
+
+double vector_error(
+    cplx a[N],
+    cplx b[N]
+)
+{
+    double err=0;
+    double norm=0;
+
+    for(int i=0;i<N;i++)
+    {
+        err += std::norm(a[i]-b[i]);
+        norm += std::norm(a[i]);
+    }
+
+    return sqrt(err)/sqrt(norm);
+}
+
+int main()
+{
+    cplx R[N][N];
+    cplx y[N];
+    cplx w_gold[N];
+    cplx w_hls[N];
+
+    load_matrix(
+        "Ru_real.csv",
+        "Ru_imag.csv",
+        R
+    );
+
+    load_vector(
+        "y_real.csv",
+        "y_imag.csv",
+        y
+    );
+
+    load_vector(
+        "w_real.csv",
+        "w_imag.csv",
+        w_gold
+    );
+
+    back_substitution(
+        R,
+        y,
+        w_hls
+    );
+
+    double err =
+        vector_error(
+            w_gold,
+            w_hls
+        );
+
+    cout<<endl;
+    cout<<"===== BACK SUBSTITUTION ====="<<endl;
+    cout<<"Relative error = "<<err<<endl;
+
+    cout<<endl;
+    cout<<"First 5 weights:"<<endl;
+
+    for(int i=0;i<5;i++)
+    {
+        cout
+            <<i<<" : "
+            <<w_gold[i]
+            <<"   "
+            <<w_hls[i]
+            <<endl;
+    }
+
+    if(err<1e-6)
+        cout<<"\nPASS"<<endl;
+    else
+        cout<<"\nFAIL"<<endl;
+
+    return 0;
+}
+
+
+---
+
+Folder structure inside Vitis HLS project
+
+mvdr_backsub/
+
+    backsub.h
+    backsub.cpp
+    tb_backsub.cpp
+
+    Ru_real.csv
+    Ru_imag.csv
+
+    y_real.csv
+    y_imag.csv
+
+    w_real.csv
+    w_imag.csv
+
+
+---
+
+Vitis HLS settings
+
+Top Function:
+
+back_substitution
+
+Design Files:
+
+backsub.cpp
+backsub.h
+
+Testbench Files:
+
+tb_backsub.cpp
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+
+Then run:
+
+C Simulation
+
+Once this works, we'll do the full QR HLS version with your MATLAB R, Q, and Ru CSV files.
+
+
+
+
+
+
+
+For Vitis HLS, you do not put the CSV files inside the HLS C++ source code. You add them as testbench files in the Vitis HLS project.
+
+Since we're doing isolated verification of back substitution first, the workflow is:
+
+Step 1: Create a folder on your PC
+
+Suppose you have:
+
+C:\mvdr_hls\backsub_hls\
+
+Inside it keep:
+
+backsub.cpp
+backsub.h
+constants.h      (or a minimal version)
+backsub_tb.cpp   <-- HLS testbench
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+
+
+---
+
+Step 2: Open Vitis HLS and create a project
+
+File → New Project
+Project name: backsub_hls
+
+
+---
+
+Step 3: Add Design Files
+
+Add only:
+
+backsub.cpp
+backsub.h
+constants.h
+
+These are the files that will be synthesized.
+
+
+---
+
+Step 4: Set Top Function
+
+Choose:
+
+back_substitution
+
+
+---
+
+Step 5: Add Testbench Files
+
+Here add:
+
+backsub_tb.cpp
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+
+Yes, the CSV files themselves are added here.
+
+
+---
+
+Step 6: What happens?
+
+When you run:
+
+Run C Simulation
+
+Vitis copies all the testbench files and CSVs into its simulation directory automatically.
+
+Then inside your testbench you can simply write:
+
+ifstream f("Ru_real.csv");
+ifstream f("y_real.csv");
+
+without any path like:
+
+"C:/mvdr_hls/verify_data/..."
+
+because Vitis already placed them in the current simulation folder.
+
+
+---
+
+So the answer is:
+
+❌ Don't hardcode paths like C:/mvdr_hls/...
+
+❌ Don't create the CSV files inside VS Code
+
+✅ Keep the CSV files in your project folder
+
+✅ Add them under Testbench Files while creating the Vitis HLS project
+
+
+For your first HLS verification of back substitution, you will add 6 CSV files as testbench files:
+
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_real.csv
+w_imag.csv
+
+After back substitution passes C simulation, we'll do the same procedure for Givens QRD.
   
