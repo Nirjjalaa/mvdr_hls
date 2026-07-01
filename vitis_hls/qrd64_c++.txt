@@ -352,3 +352,172 @@ TOMORROW (campus):
 ---
 
 First things first — run the backsub test on your laptop right now. Have you created the 4 files yet?
+
+
+
+
+
+
+
+
+
+
+Yes. Since your MATLAB → C++ verification is already complete, the HLS version of back substitution should be almost identical to your verified C++ code. Back substitution is already hardware-friendly because:
+
+Fixed matrix size (64×64)
+
+No dynamic memory
+
+No recursion
+
+Simple nested loops
+
+
+For Vitis HLS, we mainly add pragmas.
+
+backsub.h
+
+#ifndef BACKSUB_H
+#define BACKSUB_H
+
+#include "constants.h"
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+
+---
+
+backsub.cpp (Vitis HLS)
+
+#include "backsub.h"
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+#pragma HLS INLINE off
+
+BACKSUB:
+    for(int i=N-1;i>=0;i--)
+    {
+#pragma HLS PIPELINE
+
+        cplx sum = b[i];
+
+    INNER:
+        for(int j=i+1;j<N;j++)
+        {
+#pragma HLS UNROLL factor=4
+            sum -= R[i][j]*x[j];
+        }
+
+        x[i] = sum / R[i][i];
+    }
+}
+
+
+---
+
+Why this works
+
+Your verified C++:
+
+for (int i = N-1; i >= 0; i--) {
+    x[i] = b[i];
+
+    for (int j = i+1; j < N; j++)
+        x[i] -= R[i][j] * x[j];
+
+    x[i] /= R[i][i];
+}
+
+is mathematically identical to:
+
+sum=b[i];
+sum-=R[i][j]*x[j];
+x[i]=sum/R[i][i];
+
+The second form is preferred by HLS because:
+
+avoids repeated memory writes to x[i]
+
+creates a cleaner datapath
+
+synthesizes better
+
+
+
+---
+
+HLS testbench
+
+#include <iostream>
+#include "backsub.h"
+
+int main()
+{
+    cplx R[N][N];
+    cplx y[N];
+    cplx w[N];
+
+    // load Ru.csv
+    // load y.csv
+
+    back_substitution(R,y,w);
+
+    for(int i=0;i<10;i++)
+        std::cout
+            << i << " "
+            << w[i].real() << " "
+            << w[i].imag() << std::endl;
+
+    return 0;
+}
+
+
+---
+
+Your HLS flow now becomes
+
+Verified C++
+        ↓
+steering_vec_hls
+        ↓
+givens_qr_hls
+        ↓
+back_substitution_hls
+        ↓
+QH*a_s
+        ↓
+weight normalization
+        ↓
+mvdr_top()
+        ↓
+C Simulation
+        ↓
+C Synthesis
+        ↓
+RTL
+        ↓
+Versal FPGA
+
+At this point, you have successfully verified:
+
+✅ Steering Vector
+✅ Covariance Matrix
+✅ Givens QR Decomposition
+✅ Back Substitution
+✅ MVDR Gain Check
+
+So the next logical step is to create the single top-level Vitis HLS function mvdr_top() that connects QR + back substitution + normalization exactly as your verified C++ implementation does.
+
+
+
