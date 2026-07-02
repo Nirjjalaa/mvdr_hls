@@ -1,0 +1,1101 @@
+Below is the complete isolated covariance-matrix HLS project. Create three separate files exactly as shown.
+
+It implements your MATLAB operations:
+
+R = (Xtrain * Xtrain') / K;
+
+delta = 0.01 * trace(R)/N;
+R = R + delta*eye(N);
+
+No pragmas are included yet.
+
+
+---
+
+1. covariance.h
+
+#ifndef COVARIANCE_H
+#define COVARIANCE_H
+
+#include <complex>
+
+#define N 64
+#define K 5000
+
+typedef std::complex<double> cplx;
+
+/*
+ * Input:
+ *   Xtrain = 64 x 5000 complex training-data matrix
+ *
+ * Output:
+ *   R = 64 x 64 loaded covariance matrix
+ *
+ * Computation:
+ *   R = (Xtrain * Xtrain^H) / K
+ *
+ *   delta = 0.01 * trace(R) / N
+ *   R = R + delta * I
+ */
+void covariance_matrix(
+    const cplx Xtrain[N][K],
+    cplx R[N][N]
+);
+
+#endif
+
+
+---
+
+2. covariance.cpp
+
+This is the synthesizable design file.
+
+It avoids std::conj, std::abs, and std::norm in the design function, so it should not generate the cabs problem encountered in QRD.
+
+#include "covariance.h"
+
+void covariance_matrix(
+    const cplx Xtrain[N][K],
+    cplx R[N][N]
+)
+{
+    const double inverse_K =
+        1.0 / (double)K;
+
+    /*
+     * MATLAB equivalent:
+     *
+     * R = (Xtrain * Xtrain') / K;
+     *
+     * R(i,j) =
+     * sum_k Xtrain(i,k) * conj(Xtrain(j,k)) / K
+     */
+COVARIANCE_ROW:
+    for (int i = 0; i < N; i++)
+    {
+    COVARIANCE_COLUMN:
+        for (int j = 0; j < N; j++)
+        {
+            double sum_real = 0.0;
+            double sum_imag = 0.0;
+
+        SNAPSHOT_LOOP:
+            for (int k = 0; k < K; k++)
+            {
+                /*
+                 * xi = ar + j*ai
+                 * xj = br + j*bi
+                 *
+                 * xi * conj(xj)
+                 *
+                 * (ar + j*ai)(br - j*bi)
+                 *
+                 * Real:
+                 * ar*br + ai*bi
+                 *
+                 * Imaginary:
+                 * ai*br - ar*bi
+                 */
+
+                double ar =
+                    Xtrain[i][k].real();
+
+                double ai =
+                    Xtrain[i][k].imag();
+
+                double br =
+                    Xtrain[j][k].real();
+
+                double bi =
+                    Xtrain[j][k].imag();
+
+                sum_real +=
+                    ar * br +
+                    ai * bi;
+
+                sum_imag +=
+                    ai * br -
+                    ar * bi;
+            }
+
+            R[i][j] = cplx(
+                sum_real * inverse_K,
+                sum_imag * inverse_K
+            );
+        }
+    }
+
+    /*
+     * MATLAB equivalent:
+     *
+     * delta = 0.01 * trace(R) / N;
+     */
+    double trace_real = 0.0;
+
+TRACE_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+        trace_real +=
+            R[i][i].real();
+    }
+
+    double delta =
+        0.01 *
+        trace_real /
+        (double)N;
+
+    /*
+     * MATLAB equivalent:
+     *
+     * R = R + delta * eye(N);
+     */
+DIAGONAL_LOADING_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+        double loaded_real =
+            R[i][i].real() +
+            delta;
+
+        double existing_imag =
+            R[i][i].imag();
+
+        R[i][i] = cplx(
+            loaded_real,
+            existing_imag
+        );
+    }
+}
+
+
+---
+
+3. tb_covariance.cpp
+
+This complete testbench:
+
+Reads comma-separated MATLAB CSV files correctly.
+
+Confirms Xtrain has 320,000 values.
+
+Confirms R has 4,096 values.
+
+Detects missing files.
+
+Detects NaN and infinity.
+
+Compares the HLS covariance result against MATLAB R.
+
+Checks Hermitian symmetry.
+
+Checks that all diagonal values are real and positive.
+
+Checks the trace.
+
+Cannot silently pass with invalid zero data.
+
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "covariance.h"
+
+using namespace std;
+
+/*
+ * Read every number from a CSV file.
+ *
+ * MATLAB matrices contain:
+ *
+ * value,value,value,...
+ *
+ * This loader replaces commas with spaces,
+ * allowing stringstream to read every number.
+ */
+vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr
+            << "ERROR: Cannot open file: "
+            << filename
+            << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Convert comma delimiters into spaces.
+         */
+        for (size_t i = 0;
+             i < line.size();
+             i++)
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream line_stream(line);
+        double value;
+
+        while (line_stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * Load:
+ *
+ * Xtrain_real.csv
+ * Xtrain_imag.csv
+ *
+ * Expected dimensions:
+ *
+ * 64 x 5000
+ *
+ * Total values:
+ *
+ * 64 * 5000 = 320000
+ */
+void load_xtrain(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx Xtrain[N][K]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    const int expected_values =
+        N * K;
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if ((int)real_values.size() !=
+        expected_values)
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " contains "
+            << real_values.size()
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected "
+            << expected_values
+            << " values for a "
+            << N << " x " << K
+            << " matrix."
+            << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() !=
+        expected_values)
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " contains "
+            << imag_values.size()
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected "
+            << expected_values
+            << " values for a "
+            << N << " x " << K
+            << " matrix."
+            << endl;
+
+        exit(1);
+    }
+
+    int index = 0;
+
+    for (int row = 0;
+         row < N;
+         row++)
+    {
+        for (int snapshot = 0;
+             snapshot < K;
+             snapshot++)
+        {
+            Xtrain[row][snapshot] =
+                cplx(
+                    real_values[index],
+                    imag_values[index]
+                );
+
+            index++;
+        }
+    }
+
+    cout
+        << "Xtrain loaded correctly: "
+        << N << " x " << K
+        << endl;
+}
+
+/*
+ * Load a 64 x 64 complex matrix.
+ *
+ * Used for MATLAB golden R.
+ */
+void load_complex_matrix(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx matrix[N][N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    const int expected_values =
+        N * N;
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if ((int)real_values.size() !=
+        expected_values)
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " contains "
+            << real_values.size()
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected "
+            << expected_values
+            << " values for a "
+            << N << " x " << N
+            << " matrix."
+            << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() !=
+        expected_values)
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " contains "
+            << imag_values.size()
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected "
+            << expected_values
+            << " values for a "
+            << N << " x " << N
+            << " matrix."
+            << endl;
+
+        exit(1);
+    }
+
+    int index = 0;
+
+    for (int row = 0;
+         row < N;
+         row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            matrix[row][column] =
+                cplx(
+                    real_values[index],
+                    imag_values[index]
+                );
+
+            index++;
+        }
+    }
+
+    cout
+        << "Matrix loaded correctly: "
+        << N << " x " << N
+        << endl;
+}
+
+/*
+ * Check whether one complex number contains
+ * valid finite values.
+ */
+bool complex_is_finite(
+    cplx value
+)
+{
+    return
+        std::isfinite(value.real()) &&
+        std::isfinite(value.imag());
+}
+
+/*
+ * Check the entire matrix for NaN and infinity.
+ */
+bool matrix_is_finite(
+    cplx matrix[N][N]
+)
+{
+    for (int row = 0;
+         row < N;
+         row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            if (!complex_is_finite(
+                    matrix[row][column]
+                ))
+            {
+                cerr
+                    << "ERROR: Matrix contains "
+                    << "NaN or infinity at ["
+                    << row << "]["
+                    << column << "]"
+                    << endl;
+
+                cerr
+                    << "Value = "
+                    << matrix[row][column]
+                    << endl;
+
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/*
+ * Relative Frobenius matrix error:
+ *
+ * ||result - reference||F
+ * ------------------------
+ *      ||reference||F
+ */
+double relative_matrix_error(
+    cplx reference[N][N],
+    cplx result[N][N]
+)
+{
+    double difference_power = 0.0;
+    double reference_power = 0.0;
+
+    for (int row = 0;
+         row < N;
+         row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            double difference_real =
+                result[row][column].real() -
+                reference[row][column].real();
+
+            double difference_imag =
+                result[row][column].imag() -
+                reference[row][column].imag();
+
+            double reference_real =
+                reference[row][column].real();
+
+            double reference_imag =
+                reference[row][column].imag();
+
+            difference_power +=
+                difference_real *
+                difference_real +
+                difference_imag *
+                difference_imag;
+
+            reference_power +=
+                reference_real *
+                reference_real +
+                reference_imag *
+                reference_imag;
+        }
+    }
+
+    if (reference_power <
+        1.0e-30)
+    {
+        cerr
+            << "ERROR: MATLAB reference R "
+            << "has zero norm."
+            << endl;
+
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        difference_power /
+        reference_power
+    );
+}
+
+/*
+ * Maximum absolute complex-element error.
+ */
+double maximum_element_error(
+    cplx reference[N][N],
+    cplx result[N][N]
+)
+{
+    double maximum_error = 0.0;
+
+    for (int row = 0;
+         row < N;
+         row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            double difference_real =
+                result[row][column].real() -
+                reference[row][column].real();
+
+            double difference_imag =
+                result[row][column].imag() -
+                reference[row][column].imag();
+
+            double error =
+                std::sqrt(
+                    difference_real *
+                    difference_real +
+                    difference_imag *
+                    difference_imag
+                );
+
+            if (error > maximum_error)
+            {
+                maximum_error = error;
+            }
+        }
+    }
+
+    return maximum_error;
+}
+
+/*
+ * Check Hermitian property:
+ *
+ * R(i,j) = conj(R(j,i))
+ */
+double hermitian_error(
+    cplx matrix[N][N]
+)
+{
+    double difference_power = 0.0;
+    double matrix_power = 0.0;
+
+    for (int i = 0;
+         i < N;
+         i++)
+    {
+        for (int j = 0;
+             j < N;
+             j++)
+        {
+            double conjugate_real =
+                matrix[j][i].real();
+
+            double conjugate_imag =
+                -matrix[j][i].imag();
+
+            double difference_real =
+                matrix[i][j].real() -
+                conjugate_real;
+
+            double difference_imag =
+                matrix[i][j].imag() -
+                conjugate_imag;
+
+            difference_power +=
+                difference_real *
+                difference_real +
+                difference_imag *
+                difference_imag;
+
+            double matrix_real =
+                matrix[i][j].real();
+
+            double matrix_imag =
+                matrix[i][j].imag();
+
+            matrix_power +=
+                matrix_real *
+                matrix_real +
+                matrix_imag *
+                matrix_imag;
+        }
+    }
+
+    if (matrix_power <
+        1.0e-30)
+    {
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        difference_power /
+        matrix_power
+    );
+}
+
+/*
+ * Calculate real trace.
+ */
+double real_trace(
+    cplx matrix[N][N]
+)
+{
+    double trace_value = 0.0;
+
+    for (int i = 0;
+         i < N;
+         i++)
+    {
+        trace_value +=
+            matrix[i][i].real();
+    }
+
+    return trace_value;
+}
+
+/*
+ * Check that all diagonal elements are:
+ *
+ * 1. Positive
+ * 2. Approximately real
+ */
+bool check_diagonal(
+    cplx matrix[N][N]
+)
+{
+    int diagonal_pass = 0;
+
+    for (int i = 0;
+         i < N;
+         i++)
+    {
+        bool positive_real =
+            matrix[i][i].real() > 0.0;
+
+        bool imaginary_small =
+            std::fabs(
+                matrix[i][i].imag()
+            ) < 1.0e-9;
+
+        if (positive_real &&
+            imaginary_small)
+        {
+            diagonal_pass++;
+        }
+        else
+        {
+            cerr
+                << "Invalid diagonal at index "
+                << i
+                << ": "
+                << matrix[i][i]
+                << endl;
+        }
+    }
+
+    cout
+        << "Positive real diagonal = "
+        << diagonal_pass
+        << "/" << N
+        << endl;
+
+    return diagonal_pass == N;
+}
+
+int main()
+{
+    /*
+     * Use static storage because Xtrain is large.
+     */
+    static cplx Xtrain[N][K];
+
+    static cplx R_matlab[N][N];
+    static cplx R_hls[N][N];
+
+    cout << endl;
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "COVARIANCE MATRIX HLS VERIFICATION"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    /*
+     * Load MATLAB training data.
+     */
+    load_xtrain(
+        "Xtrain_real.csv",
+        "Xtrain_imag.csv",
+        Xtrain
+    );
+
+    /*
+     * Load MATLAB golden covariance matrix.
+     *
+     * This R must already include diagonal loading.
+     */
+    load_complex_matrix(
+        "R_real.csv",
+        "R_imag.csv",
+        R_matlab
+    );
+
+    /*
+     * Run the HLS covariance computation.
+     */
+    covariance_matrix(
+        Xtrain,
+        R_hls
+    );
+
+    /*
+     * Immediately reject NaN or infinity.
+     */
+    if (!matrix_is_finite(R_hls))
+    {
+        cout << endl;
+
+        cout
+            << "COVARIANCE TEST FAILED"
+            << endl;
+
+        return 1;
+    }
+
+    double relative_error =
+        relative_matrix_error(
+            R_matlab,
+            R_hls
+        );
+
+    double max_error =
+        maximum_element_error(
+            R_matlab,
+            R_hls
+        );
+
+    double h_error =
+        hermitian_error(
+            R_hls
+        );
+
+    double matlab_trace =
+        real_trace(
+            R_matlab
+        );
+
+    double hls_trace =
+        real_trace(
+            R_hls
+        );
+
+    double trace_relative_error;
+
+    if (std::fabs(matlab_trace) >
+        1.0e-30)
+    {
+        trace_relative_error =
+            std::fabs(
+                hls_trace -
+                matlab_trace
+            ) /
+            std::fabs(matlab_trace);
+    }
+    else
+    {
+        trace_relative_error =
+            numeric_limits<double>::infinity();
+    }
+
+    bool diagonal_pass =
+        check_diagonal(R_hls);
+
+    cout << endl;
+    cout
+        << "===== COVARIANCE RESULTS ====="
+        << endl;
+
+    cout
+        << "Relative matrix error = "
+        << relative_error
+        << endl;
+
+    cout
+        << "Maximum element error = "
+        << max_error
+        << endl;
+
+    cout
+        << "Hermitian error       = "
+        << h_error
+        << endl;
+
+    cout
+        << "MATLAB trace          = "
+        << matlab_trace
+        << endl;
+
+    cout
+        << "HLS trace             = "
+        << hls_trace
+        << endl;
+
+    cout
+        << "Relative trace error  = "
+        << trace_relative_error
+        << endl;
+
+    cout << endl;
+    cout
+        << "Top-left 3 x 3 MATLAB R:"
+        << endl;
+
+    for (int i = 0;
+         i < 3;
+         i++)
+    {
+        for (int j = 0;
+             j < 3;
+             j++)
+        {
+            cout
+                << R_matlab[i][j]
+                << "  ";
+        }
+
+        cout << endl;
+    }
+
+    cout << endl;
+    cout
+        << "Top-left 3 x 3 HLS R:"
+        << endl;
+
+    for (int i = 0;
+         i < 3;
+         i++)
+    {
+        for (int j = 0;
+             j < 3;
+             j++)
+        {
+            cout
+                << R_hls[i][j]
+                << "  ";
+        }
+
+        cout << endl;
+    }
+
+    /*
+     * Initial double-precision C-simulation
+     * tolerance.
+     */
+    const double TOLERANCE =
+        1.0e-6;
+
+    bool passed =
+        std::isfinite(relative_error) &&
+        std::isfinite(max_error) &&
+        std::isfinite(h_error) &&
+        std::isfinite(
+            trace_relative_error
+        ) &&
+        relative_error <
+            TOLERANCE &&
+        h_error <
+            TOLERANCE &&
+        trace_relative_error <
+            TOLERANCE &&
+        diagonal_pass;
+
+    cout << endl;
+
+    if (passed)
+    {
+        cout
+            << "======================================"
+            << endl;
+
+        cout
+            << "COVARIANCE MATRIX TEST PASSED"
+            << endl;
+
+        cout
+            << "======================================"
+            << endl;
+
+        return 0;
+    }
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "COVARIANCE MATRIX TEST FAILED"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    return 1;
+}
+
+
+---
+
+Folder structure
+
+C:\mvdr_hls\covariance\
+│
+├── covariance.h
+├── covariance.cpp
+├── tb_covariance.cpp
+│
+├── Xtrain_real.csv
+├── Xtrain_imag.csv
+├── R_real.csv
+└── R_imag.csv
+
+Do not add your desktop matrix.cpp, matrix.h, constants.h, or main_matrix.cpp to this isolated HLS component.
+
+
+---
+
+Vitis HLS settings
+
+Top function
+
+covariance_matrix
+
+Design files
+
+covariance.cpp
+covariance.h
+
+Testbench files
+
+tb_covariance.cpp
+
+Xtrain_real.csv
+Xtrain_imag.csv
+
+R_real.csv
+R_imag.csv
+
+Only one function is selected as the synthesis top; helper and validation code belongs in the testbench rather than the hardware design. 
+
+
+---
+
+Before running Vitis
+
+Check the files in MATLAB:
+
+Xr = readmatrix('Xtrain_real.csv');
+Xi = readmatrix('Xtrain_imag.csv');
+
+Rr = readmatrix('R_real.csv');
+Ri = readmatrix('R_imag.csv');
+
+fprintf('Xtrain real: %d x %d, values = %d\n', ...
+    size(Xr,1), size(Xr,2), numel(Xr));
+
+fprintf('Xtrain imag: %d x %d, values = %d\n', ...
+    size(Xi,1), size
+
+
+
+
+
+
+
+
+
+  
+  
