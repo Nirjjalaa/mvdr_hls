@@ -1099,3 +1099,2675 @@ fprintf('Xtrain imag: %d x %d, values = %d\n', ...
 
   
   
+Your C++ verification code is enough. Below is the complete isolated steering-vector HLS project, preserving the exact verified formula and array ordering.
+
+It verifies all three vectors:
+
+Target: 
+
+Interference 1: 
+
+Interference 2: 
+
+
+No pragmas are included yet.
+
+
+---
+
+1. steering_vec.h
+
+#ifndef STEERING_VEC_H
+#define STEERING_VEC_H
+
+#include <complex>
+
+#define NX 8
+#define NY 8
+#define N 64
+
+#define PI 3.14159265358979323846
+
+typedef std::complex<double> cplx;
+
+/*
+ * Generate the normalized steering vector
+ * for an 8 x 8 uniform rectangular array.
+ *
+ * Inputs:
+ *   az_deg = azimuth in degrees
+ *   el_deg = elevation in degrees
+ *   d      = element spacing in wavelengths
+ *
+ * Output:
+ *   a = 64 x 1 normalized complex steering vector
+ */
+void steering_vec(
+    double az_deg,
+    double el_deg,
+    double d,
+    cplx a[N]
+);
+
+#endif
+
+
+---
+
+2. steering_vec.cpp
+
+This is the synthesizable design file.
+
+#include "steering_vec.h"
+#include <cmath>
+
+void steering_vec(
+    double az_deg,
+    double el_deg,
+    double d,
+    cplx a[N]
+)
+{
+    /*
+     * Convert degrees into radians.
+     */
+    double az =
+        az_deg * PI / 180.0;
+
+    double el =
+        el_deg * PI / 180.0;
+
+    /*
+     * Direction components used in your
+     * MATLAB steering-vector function.
+     */
+    double u =
+        std::sin(az) *
+        std::cos(el);
+
+    double v =
+        std::sin(el);
+
+    /*
+     * Since N = 64:
+     *
+     * 1 / sqrt(64) = 0.125
+     *
+     * Using the exact value avoids an
+     * unnecessary square-root unit.
+     */
+    const double normalization =
+        0.125;
+
+    int index = 0;
+
+STEERING_Y:
+    for (int y = 0; y < NY; y++)
+    {
+    STEERING_X:
+        for (int x = 0; x < NX; x++)
+        {
+            /*
+             * MATLAB equivalent:
+             *
+             * phase =
+             * 2*pi*d*(x*u + y*v);
+             */
+            double phase =
+                2.0 * PI * d *
+                (
+                    (double)x * u +
+                    (double)y * v
+                );
+
+            /*
+             * exp(j*phase) =
+             * cos(phase) + j*sin(phase)
+             */
+            double output_real =
+                normalization *
+                std::cos(phase);
+
+            double output_imag =
+                normalization *
+                std::sin(phase);
+
+            a[index] = cplx(
+                output_real,
+                output_imag
+            );
+
+            index++;
+        }
+    }
+}
+
+This uses only real-valued sin() and cos() functions. It does not use complex abs, norm, or conj, so it will not generate the earlier cabs error. AMD’s HLS flow supports synthesizable mathematical functions for floating-point types. 
+
+The array order exactly matches your MATLAB:
+
+for y = 0:Ny-1
+    for x = 0:Nx-1
+
+
+---
+
+3. tb_steering_vec.cpp
+
+This testbench loads the complete 64-element MATLAB steering vectors from CSV and verifies all three angle combinations.
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "steering_vec.h"
+
+using namespace std;
+
+/*
+ * Read all numerical values from a CSV file.
+ *
+ * This accepts:
+ *   - one value per line
+ *   - comma-separated values
+ */
+vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr
+            << "ERROR: Cannot open file: "
+            << filename
+            << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Replace commas with spaces.
+         */
+        for (size_t i = 0;
+             i < line.size();
+             i++)
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream line_stream(line);
+        double value;
+
+        while (line_stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * Load one 64 x 1 complex vector.
+ */
+void load_complex_vector(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx vector_output[N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if ((int)real_values.size() != N)
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " must contain exactly "
+            << N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() != N)
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " must contain exactly "
+            << N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    for (int i = 0; i < N; i++)
+    {
+        vector_output[i] = cplx(
+            real_values[i],
+            imag_values[i]
+        );
+    }
+
+    cout
+        << "Vector loaded correctly: "
+        << N << " x 1"
+        << endl;
+}
+
+/*
+ * Check whether one complex number is finite.
+ */
+bool complex_is_finite(
+    cplx value
+)
+{
+    return
+        std::isfinite(value.real()) &&
+        std::isfinite(value.imag());
+}
+
+/*
+ * Relative vector error:
+ *
+ * ||result-reference||2
+ * ---------------------
+ *    ||reference||2
+ */
+double relative_vector_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double difference_power = 0.0;
+    double reference_power = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        if (!complex_is_finite(result[i]))
+        {
+            cerr
+                << "ERROR: Result contains NaN "
+                << "or infinity at index "
+                << i
+                << endl;
+
+            return
+                numeric_limits<double>::infinity();
+        }
+
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double reference_real =
+            reference[i].real();
+
+        double reference_imag =
+            reference[i].imag();
+
+        difference_power +=
+            difference_real *
+            difference_real +
+            difference_imag *
+            difference_imag;
+
+        reference_power +=
+            reference_real *
+            reference_real +
+            reference_imag *
+            reference_imag;
+    }
+
+    if (reference_power < 1.0e-30)
+    {
+        cerr
+            << "ERROR: Reference vector "
+            << "has zero norm."
+            << endl;
+
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        difference_power /
+        reference_power
+    );
+}
+
+/*
+ * Maximum element error.
+ */
+double maximum_element_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double maximum_error = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double element_error =
+            std::sqrt(
+                difference_real *
+                difference_real +
+                difference_imag *
+                difference_imag
+            );
+
+        if (element_error > maximum_error)
+        {
+            maximum_error = element_error;
+        }
+    }
+
+    return maximum_error;
+}
+
+/*
+ * Check the vector norm.
+ *
+ * Every generated steering vector should have:
+ *
+ * ||a|| approximately equal to 1
+ */
+double vector_norm(
+    cplx vector_input[N]
+)
+{
+    double norm_power = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double real_part =
+            vector_input[i].real();
+
+        double imag_part =
+            vector_input[i].imag();
+
+        norm_power +=
+            real_part * real_part +
+            imag_part * imag_part;
+    }
+
+    return std::sqrt(norm_power);
+}
+
+/*
+ * Execute and verify one steering-vector case.
+ */
+bool test_steering_case(
+    const char* test_name,
+    double azimuth,
+    double elevation,
+    double spacing,
+    cplx golden[N],
+    cplx result[N]
+)
+{
+    cout << endl;
+
+    cout
+        << "--------------------------------------"
+        << endl;
+
+    cout
+        << test_name
+        << endl;
+
+    cout
+        << "Azimuth  = "
+        << azimuth
+        << " degrees"
+        << endl;
+
+    cout
+        << "Elevation = "
+        << elevation
+        << " degrees"
+        << endl;
+
+    cout
+        << "--------------------------------------"
+        << endl;
+
+    steering_vec(
+        azimuth,
+        elevation,
+        spacing,
+        result
+    );
+
+    double relative_error =
+        relative_vector_error(
+            golden,
+            result
+        );
+
+    double maximum_error =
+        maximum_element_error(
+            golden,
+            result
+        );
+
+    double result_norm =
+        vector_norm(result);
+
+    double norm_error =
+        std::fabs(
+            result_norm - 1.0
+        );
+
+    cout
+        << "Relative error        = "
+        << relative_error
+        << endl;
+
+    cout
+        << "Maximum element error = "
+        << maximum_error
+        << endl;
+
+    cout
+        << "Vector norm           = "
+        << result_norm
+        << endl;
+
+    cout
+        << "Norm error            = "
+        << norm_error
+        << endl;
+
+    cout << endl;
+    cout
+        << "First five elements:"
+        << endl;
+
+    for (int i = 0; i < 5; i++)
+    {
+        cout
+            << "Index "
+            << i
+            << endl;
+
+        cout
+            << "MATLAB = "
+            << golden[i]
+            << endl;
+
+        cout
+            << "HLS    = "
+            << result[i]
+            << endl;
+    }
+
+    /*
+     * CSV values exported by MATLAB retain much
+     * more precision than the rounded 4-decimal
+     * values in your original desktop test.
+     */
+    const double TOLERANCE =
+        1.0e-8;
+
+    bool passed =
+        std::isfinite(relative_error) &&
+        std::isfinite(maximum_error) &&
+        std::isfinite(result_norm) &&
+        relative_error < TOLERANCE &&
+        maximum_error < TOLERANCE &&
+        norm_error < TOLERANCE;
+
+    if (passed)
+    {
+        cout
+            << test_name
+            << ": PASSED"
+            << endl;
+    }
+    else
+    {
+        cout
+            << test_name
+            << ": FAILED"
+            << endl;
+    }
+
+    return passed;
+}
+
+int main()
+{
+    static cplx a_target_gold[N];
+    static cplx a_i1_gold[N];
+    static cplx a_i2_gold[N];
+
+    static cplx a_target_hls[N];
+    static cplx a_i1_hls[N];
+    static cplx a_i2_hls[N];
+
+    cout << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "STEERING VECTOR HLS VERIFICATION"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    /*
+     * Load MATLAB golden steering vectors.
+     */
+    load_complex_vector(
+        "a_s_real.csv",
+        "a_s_imag.csv",
+        a_target_gold
+    );
+
+    load_complex_vector(
+        "a_i1_real.csv",
+        "a_i1_imag.csv",
+        a_i1_gold
+    );
+
+    load_complex_vector(
+        "a_i2_real.csv",
+        "a_i2_imag.csv",
+        a_i2_gold
+    );
+
+    /*
+     * Test the same angles used in MATLAB.
+     */
+    bool target_pass =
+        test_steering_case(
+            "TARGET STEERING VECTOR",
+            40.0,
+            0.0,
+            0.5,
+            a_target_gold,
+            a_target_hls
+        );
+
+    bool interference1_pass =
+        test_steering_case(
+            "INTERFERENCE 1 STEERING VECTOR",
+            30.0,
+            10.0,
+            0.5,
+            a_i1_gold,
+            a_i1_hls
+        );
+
+    bool interference2_pass =
+        test_steering_case(
+            "INTERFERENCE 2 STEERING VECTOR",
+            -60.0,
+            -25.0,
+            0.5,
+            a_i2_gold,
+            a_i2_hls
+        );
+
+    bool overall_pass =
+        target_pass &&
+        interference1_pass &&
+        interference2_pass;
+
+    cout << endl;
+
+    if (overall_pass)
+    {
+        cout
+            << "======================================"
+            << endl;
+
+        cout
+            << "STEERING VECTOR TEST PASSED"
+            << endl;
+
+        cout
+            << "======================================"
+            << endl;
+
+        return 0;
+    }
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "STEERING VECTOR TEST FAILED"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    return 1;
+}
+
+AMD recommends a self-checking testbench for C simulation, which is what this testbench provides. 
+
+
+---
+
+Required CSV files
+
+Add these six files as testbench files:
+
+a_s_real.csv
+a_s_imag.csv
+
+a_i1_real.csv
+a_i1_imag.csv
+
+a_i2_real.csv
+a_i2_imag.csv
+
+Each must contain:
+
+64 rows × 1 column = 64 values
+
+Check in MATLAB:
+
+Asr = readmatrix('a_s_real.csv');
+Asi = readmatrix('a_s_imag.csv');
+
+A1r = readmatrix('a_i1_real.csv');
+A1i = readmatrix('a_i1_imag.csv');
+
+A2r = readmatrix('a_i2_real.csv');
+A2i = readmatrix('a_i2_imag.csv');
+
+fprintf('a_s real  : %d x %d, values = %d\n', ...
+    size(Asr,1), size(Asr,2), numel(Asr));
+
+fprintf('a_s imag  : %d x %d, values = %d\n', ...
+    size(Asi,1), size(Asi,2), numel(Asi));
+
+fprintf('a_i1 real : %d x %d, values = %d\n', ...
+    size(A1r,1), size(A1r,2), numel(A1r));
+
+fprintf('a_i1 imag : %d x %d, values = %d\n', ...
+    size(A1i,1), size(A1i,2), numel(A1i));
+
+fprintf('a_i2 real : %d x %d, values = %d\n', ...
+    size(A2r,1), size(A2r,2), numel(A2r));
+
+fprintf('a_i2 imag : %d x %d, values = %d\n', ...
+    size(A2i,1), size(A2i,2), numel(A2i));
+
+Expected for each:
+
+64 x 1, values = 64
+
+
+---
+
+Folder structure
+
+C:\mvdr_hls\steering\
+│
+├── steering_vec.h
+├── steering_vec.cpp
+├── tb_steering_vec.cpp
+│
+├── a_s_real.csv
+├── a_s_imag.csv
+├── a_i1_real.csv
+├── a_i1_imag.csv
+├── a_i2_real.csv
+└── a_i2_imag.csv
+
+
+---
+
+Vitis HLS settings
+
+Top function
+
+steering_vec
+
+Design files
+
+steering_vec.cpp
+steering_vec.h
+
+Testbench files
+
+tb_steering_vec.cpp
+
+a_s_real.csv
+a_s_imag.csv
+
+a_i1_real.csv
+a_i1_imag.csv
+
+a_i2_real.csv
+a_i2_imag.csv
+
+Device
+
+xcvc1902-vsva2197-2MP-e-S
+
+Clock
+
+10 ns
+
+
+---
+
+Run order
+
+1. Run C Simulation
+2. Confirm STEERING VECTOR TEST PASSED
+3. Run C Synthesis
+4. Do not add pragmas yet
+
+Unlike covariance, this steering block is small. Its main synthesis cost will come from the floating-point sine and cosine operations, not from array memory.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+This block computes:
+
+y=Q^Ha_s
+
+For each output element:
+
+y_i=\sum_{j=0}^{63}Q_{j,i}^{*}a_{s,j}
+
+It uses the complex conjugate transpose of Q, not an ordinary transpose. It does not perform back substitution or weight normalization.
+
+Create these three separate files.
+
+
+---
+
+1. qh_multiply.h
+
+#ifndef QH_MULTIPLY_H
+#define QH_MULTIPLY_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<double> cplx;
+
+/*
+ * Computes:
+ *
+ * y = Q^H * a
+ *
+ * Q: 64 x 64 complex matrix
+ * a: 64 x 1 complex steering vector
+ * y: 64 x 1 complex output vector
+ */
+void qh_multiply(
+    const cplx Q[N][N],
+    const cplx a[N],
+    cplx y[N]
+);
+
+#endif
+
+
+---
+
+2. qh_multiply.cpp
+
+This is the synthesizable design file.
+
+It manually performs conjugation and complex multiplication, avoiding std::conj, std::abs, and std::norm inside the hardware function.
+
+#include "qh_multiply.h"
+
+void qh_multiply(
+    const cplx Q[N][N],
+    const cplx a[N],
+    cplx y[N]
+)
+{
+QH_OUTPUT_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+        double sum_real = 0.0;
+        double sum_imag = 0.0;
+
+    QH_ACCUMULATION_LOOP:
+        for (int j = 0; j < N; j++)
+        {
+            /*
+             * Q^H(i,j) = conj(Q(j,i))
+             *
+             * Q(j,i) = qr + j*qi
+             * conj(Q(j,i)) = qr - j*qi
+             *
+             * a(j) = ar + j*ai
+             *
+             * conj(Q(j,i)) * a(j):
+             *
+             * real = qr*ar + qi*ai
+             * imag = qr*ai - qi*ar
+             */
+
+            double qr =
+                Q[j][i].real();
+
+            double qi =
+                Q[j][i].imag();
+
+            double ar =
+                a[j].real();
+
+            double ai =
+                a[j].imag();
+
+            double product_real =
+                qr * ar +
+                qi * ai;
+
+            double product_imag =
+                qr * ai -
+                qi * ar;
+
+            sum_real += product_real;
+            sum_imag += product_imag;
+        }
+
+        y[i] = cplx(
+            sum_real,
+            sum_imag
+        );
+    }
+}
+
+Do not add pragmas yet.
+
+
+---
+
+3. tb_qh_multiply.cpp
+
+This testbench loads:
+
+Q_real.csv
+Q_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+
+y_real.csv
+y_imag.csv
+
+It verifies the complete 64-element HLS output against MATLAB.
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "qh_multiply.h"
+
+using namespace std;
+
+/*
+ * Reads every number from a CSV file.
+ *
+ * Supports:
+ *   - comma-separated matrix rows
+ *   - one-value-per-line vectors
+ */
+vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr
+            << "ERROR: Cannot open file: "
+            << filename
+            << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Convert commas into spaces.
+         */
+        for (size_t i = 0;
+             i < line.size();
+             i++)
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream line_stream(line);
+        double value;
+
+        while (line_stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * Load a 64 x 64 complex matrix.
+ */
+void load_complex_matrix(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx matrix[N][N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    const int expected_values =
+        N * N;
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if ((int)real_values.size() !=
+        expected_values)
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " contains "
+            << real_values.size()
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected "
+            << expected_values
+            << " values for a "
+            << N << " x " << N
+            << " matrix."
+            << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() !=
+        expected_values)
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " contains "
+            << imag_values.size()
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected "
+            << expected_values
+            << " values for a "
+            << N << " x " << N
+            << " matrix."
+            << endl;
+
+        exit(1);
+    }
+
+    int index = 0;
+
+    for (int row = 0;
+         row < N;
+         row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            matrix[row][column] =
+                cplx(
+                    real_values[index],
+                    imag_values[index]
+                );
+
+            index++;
+        }
+    }
+
+    cout
+        << "Matrix loaded correctly: "
+        << N << " x " << N
+        << endl;
+}
+
+/*
+ * Load a 64 x 1 complex vector.
+ */
+void load_complex_vector(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx vector_output[N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if ((int)real_values.size() != N)
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " must contain exactly "
+            << N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() != N)
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " must contain exactly "
+            << N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    for (int i = 0; i < N; i++)
+    {
+        vector_output[i] =
+            cplx(
+                real_values[i],
+                imag_values[i]
+            );
+    }
+
+    cout
+        << "Vector loaded correctly: "
+        << N << " x 1"
+        << endl;
+}
+
+/*
+ * Check whether one complex value is finite.
+ */
+bool complex_is_finite(
+    cplx value
+)
+{
+    return
+        std::isfinite(value.real()) &&
+        std::isfinite(value.imag());
+}
+
+/*
+ * Verify that every output value is finite.
+ */
+bool vector_is_finite(
+    cplx vector_input[N]
+)
+{
+    for (int i = 0; i < N; i++)
+    {
+        if (!complex_is_finite(
+                vector_input[i]
+            ))
+        {
+            cerr
+                << "ERROR: Vector contains NaN "
+                << "or infinity at index "
+                << i
+                << endl;
+
+            cerr
+                << "Value = "
+                << vector_input[i]
+                << endl;
+
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/*
+ * Relative vector error:
+ *
+ * ||result-reference||2
+ * ---------------------
+ *    ||reference||2
+ */
+double relative_vector_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double difference_power = 0.0;
+    double reference_power = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double reference_real =
+            reference[i].real();
+
+        double reference_imag =
+            reference[i].imag();
+
+        difference_power +=
+            difference_real *
+            difference_real +
+            difference_imag *
+            difference_imag;
+
+        reference_power +=
+            reference_real *
+            reference_real +
+            reference_imag *
+            reference_imag;
+    }
+
+    if (reference_power <
+        1.0e-30)
+    {
+        cerr
+            << "ERROR: MATLAB golden y "
+            << "has zero norm."
+            << endl;
+
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        difference_power /
+        reference_power
+    );
+}
+
+/*
+ * Calculate maximum individual element error.
+ */
+double maximum_element_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double maximum_error = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double element_error =
+            std::sqrt(
+                difference_real *
+                difference_real +
+                difference_imag *
+                difference_imag
+            );
+
+        if (element_error >
+            maximum_error)
+        {
+            maximum_error =
+                element_error;
+        }
+    }
+
+    return maximum_error;
+}
+
+/*
+ * Independent testbench calculation:
+ *
+ * y = Q^H * a
+ *
+ * This is not synthesized.
+ */
+void calculate_reference_in_testbench(
+    cplx Q[N][N],
+    cplx a[N],
+    cplx y_reference[N]
+)
+{
+    for (int i = 0; i < N; i++)
+    {
+        cplx sum =
+            cplx(0.0, 0.0);
+
+        for (int j = 0; j < N; j++)
+        {
+            sum +=
+                std::conj(Q[j][i]) *
+                a[j];
+        }
+
+        y_reference[i] = sum;
+    }
+}
+
+int main()
+{
+    static cplx Q[N][N];
+
+    static cplx a_s[N];
+
+    static cplx y_matlab[N];
+    static cplx y_hls[N];
+
+    static cplx y_tb_reference[N];
+
+    cout << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "Q-HERMITIAN MULTIPLICATION TEST"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    /*
+     * Load MATLAB Q matrix.
+     */
+    load_complex_matrix(
+        "Q_real.csv",
+        "Q_imag.csv",
+        Q
+    );
+
+    /*
+     * Load MATLAB target steering vector.
+     */
+    load_complex_vector(
+        "a_s_real.csv",
+        "a_s_imag.csv",
+        a_s
+    );
+
+    /*
+     * Load MATLAB:
+     *
+     * y = Q' * a_s
+     */
+    load_complex_vector(
+        "y_real.csv",
+        "y_imag.csv",
+        y_matlab
+    );
+
+    /*
+     * Execute HLS function.
+     */
+    qh_multiply(
+        Q,
+        a_s,
+        y_hls
+    );
+
+    /*
+     * Independently calculate the same result
+     * in the testbench.
+     */
+    calculate_reference_in_testbench(
+        Q,
+        a_s,
+        y_tb_reference
+    );
+
+    /*
+     * Detect NaN or infinity before computing
+     * relative errors.
+     */
+    if (!vector_is_finite(y_hls))
+    {
+        cout << endl;
+
+        cout
+            << "QH MULTIPLICATION TEST FAILED"
+            << endl;
+
+        return 1;
+    }
+
+    double matlab_relative_error =
+        relative_vector_error(
+            y_matlab,
+            y_hls
+        );
+
+    double testbench_relative_error =
+        relative_vector_error(
+            y_tb_reference,
+            y_hls
+        );
+
+    double maximum_error =
+        maximum_element_error(
+            y_matlab,
+            y_hls
+        );
+
+    cout << endl;
+
+    cout
+        << "===== QH MULTIPLICATION RESULTS ====="
+        << endl;
+
+    cout
+        << "MATLAB relative error   = "
+        << matlab_relative_error
+        << endl;
+
+    cout
+        << "Testbench relative error= "
+        << testbench_relative_error
+        << endl;
+
+    cout
+        << "Maximum element error   = "
+        << maximum_error
+        << endl;
+
+    cout << endl;
+
+    cout
+        << "First five y values:"
+        << endl;
+
+    for (int i = 0; i < 5; i++)
+    {
+        cout << endl;
+
+        cout
+            << "Index "
+            << i
+            << endl;
+
+        cout
+            << "MATLAB = "
+            << y_matlab[i]
+            << endl;
+
+        cout
+            << "HLS    = "
+            << y_hls[i]
+            << endl;
+
+        cout
+            << "TB ref = "
+            << y_tb_reference[i]
+            << endl;
+    }
+
+    /*
+     * Double-precision initial verification.
+     */
+    const double TOLERANCE =
+        1.0e-8;
+
+    bool passed =
+        std::isfinite(
+            matlab_relative_error
+        ) &&
+        std::isfinite(
+            testbench_relative_error
+        ) &&
+        std::isfinite(
+            maximum_error
+        ) &&
+        matlab_relative_error <
+            TOLERANCE &&
+        testbench_relative_error <
+            TOLERANCE &&
+        maximum_error <
+            TOLERANCE;
+
+    cout << endl;
+
+    if (passed)
+    {
+        cout
+            << "======================================"
+            << endl;
+
+        cout
+            << "QH MULTIPLICATION TEST PASSED"
+            << endl;
+
+        cout
+            << "======================================"
+            << endl;
+
+        return 0;
+    }
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "QH MULTIPLICATION TEST FAILED"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    return 1;
+}
+
+The testbench uses standard complex functions only in nonsynthesized validation code. AMD recommends self-checking C testbenches that return 0 when the result passes and a nonzero value when it fails. 
+
+
+---
+
+Required CSV files
+
+Q_real.csv
+Q_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+
+y_real.csv
+y_imag.csv
+
+Expected dimensions:
+
+Q_real.csv → 64 × 64 = 4096 values
+Q_imag.csv → 64 × 64 = 4096 values
+
+a_s_real.csv → 64 × 1 = 64 values
+a_s_imag.csv → 64 × 1 = 64 values
+
+y_real.csv → 64 × 1 = 64 values
+y_imag.csv → 64 × 1 = 64 values
+
+Check in MATLAB:
+
+Qr = readmatrix('Q_real.csv');
+Qi = readmatrix('Q_imag.csv');
+
+Ar = readmatrix('a_s_real.csv');
+Ai = readmatrix('a_s_imag.csv');
+
+Yr = readmatrix('y_real.csv');
+Yi = readmatrix('y_imag.csv');
+
+fprintf('Q real: %d x %d, values = %d\n', ...
+    size(Qr,1), size(Qr,2), numel(Qr));
+
+fprintf('Q imag: %d x %d, values = %d\n', ...
+    size(Qi,1), size(Qi,2), numel(Qi));
+
+fprintf('a_s real: %d x %d, values = %d\n', ...
+    size(Ar,1), size(Ar,2), numel(Ar));
+
+fprintf('a_s imag: %d x %d, values = %d\n', ...
+    size(Ai,1), size(Ai,2), numel(Ai));
+
+fprintf('y real: %d x %d, values = %d\n', ...
+    size(Yr,1), size(Yr,2), numel(Yr));
+
+fprintf('y imag: %d x %d, values = %d\n', ...
+    size(Yi,1), size(Yi,2), numel(Yi));
+
+
+---
+
+Folder structure
+
+C:\mvdr_hls\qh_multiply\
+│
+├── qh_multiply.h
+├── qh_multiply.cpp
+├── tb_qh_multiply.cpp
+│
+├── Q_real.csv
+├── Q_imag.csv
+├── a_s_real.csv
+├── a_s_imag.csv
+├── y_real.csv
+└── y_imag.csv
+
+Vitis HLS settings
+
+Top function
+
+qh_multiply
+
+Design files
+
+qh_multiply.cpp
+qh_multiply.h
+
+Testbench files
+
+tb_qh_multiply.cpp
+Q_real.csv
+Q_imag.csv
+a_s_real.csv
+a_s_imag.csv
+y_real.csv
+y_imag.csv
+
+Continue with std::complex<double> because that is the type recognized in your installation; AMD documentation identifies std::complex<T> as a supported way of representing complex signals in Vitis HLS-related C++ flows. 
+
+Run:
+
+1. C Simulation
+2. Confirm QH MULTIPLICATION TEST PASSED
+3. C Synthesis
+4. No pragmas yet
+
+After this, the next isolated block is weight normalization:
+
+w_unnorm + a_s
+        ↓
+w = w_unnorm / (a_sᴴw_unnorm)
+
+
+
+
+
+
+
+
+
+
+
+
+This block converts the raw back-substitution output into the final MVDR weights:
+
+\text{denominator}=a_s^H w_{\text{unnorm}}
+
+w_{\text{MVDR}}
+=
+\frac{w_{\text{unnorm}}}
+{a_s^H w_{\text{unnorm}}}
+
+After normalization:
+
+a_s^H w_{\text{MVDR}}\approx1
+
+and therefore:
+
+\left|w_{\text{MVDR}}^H a_s\right|\approx1
+
+The Euclidean norm norm(w) does not need to equal 1. It is the directional response  that is normalized.
+
+AMD documents std::complex<T> as a supported representation for complex signals in Vitis HLS-related C++ flows. The testbench below is self-checking and returns zero only when all comparisons pass. 
+
+Create these three separate files.
+
+1. normalize_weights.h
+
+#ifndef NORMALIZE_WEIGHTS_H
+#define NORMALIZE_WEIGHTS_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<double> cplx;
+
+/*
+ * MVDR weight normalization:
+ *
+ * denominator = a^H * w_in
+ *
+ * w_out = w_in / denominator
+ *
+ * Inputs:
+ *   a     = 64 x 1 target steering vector
+ *   w_in  = 64 x 1 unnormalized back-substitution output
+ *
+ * Output:
+ *   w_out = 64 x 1 final normalized MVDR weights
+ */
+void normalize_weights(
+    const cplx a[N],
+    const cplx w_in[N],
+    cplx w_out[N]
+);
+
+#endif
+
+2. normalize_weights.cpp
+
+This is the synthesizable source.
+
+It manually computes:
+
+Complex conjugation
+
+Complex dot product
+
+Complex division
+
+
+It does not use std::conj, std::abs, or std::norm inside the hardware function.
+
+#include "normalize_weights.h"
+
+/*
+ * Manual complex division:
+ *
+ * numerator   = nr + j*ni
+ * denominator = dr + j*di
+ *
+ * result real =
+ * (nr*dr + ni*di) / (dr^2 + di^2)
+ *
+ * result imag =
+ * (ni*dr - nr*di) / (dr^2 + di^2)
+ */
+static cplx complex_divide(
+    cplx numerator,
+    cplx denominator
+)
+{
+    double nr = numerator.real();
+    double ni = numerator.imag();
+
+    double dr = denominator.real();
+    double di = denominator.imag();
+
+    double denominator_power =
+        dr * dr + di * di;
+
+    /*
+     * A valid MVDR solution should not produce
+     * a zero normalization factor.
+     *
+     * This guard prevents NaN if invalid input
+     * data is supplied.
+     */
+    if (denominator_power < 1.0e-30)
+    {
+        return cplx(0.0, 0.0);
+    }
+
+    double output_real =
+        (nr * dr + ni * di) /
+        denominator_power;
+
+    double output_imag =
+        (ni * dr - nr * di) /
+        denominator_power;
+
+    return cplx(
+        output_real,
+        output_imag
+    );
+}
+
+void normalize_weights(
+    const cplx a[N],
+    const cplx w_in[N],
+    cplx w_out[N]
+)
+{
+    double denominator_real = 0.0;
+    double denominator_imag = 0.0;
+
+    /*
+     * Compute:
+     *
+     * denominator = a^H * w_in
+     *
+     * For each element:
+     *
+     * a = ar + j*ai
+     * w = wr + j*wi
+     *
+     * conj(a) * w =
+     *
+     * real = ar*wr + ai*wi
+     * imag = ar*wi - ai*wr
+     */
+NORMALIZATION_DOT_PRODUCT:
+    for (int i = 0; i < N; i++)
+    {
+        double ar = a[i].real();
+        double ai = a[i].imag();
+
+        double wr = w_in[i].real();
+        double wi = w_in[i].imag();
+
+        denominator_real +=
+            ar * wr +
+            ai * wi;
+
+        denominator_imag +=
+            ar * wi -
+            ai * wr;
+    }
+
+    cplx denominator(
+        denominator_real,
+        denominator_imag
+    );
+
+    /*
+     * Divide every raw weight by the same
+     * complex normalization factor.
+     */
+NORMALIZE_WEIGHT_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+        w_out[i] =
+            complex_divide(
+                w_in[i],
+                denominator
+            );
+    }
+}
+
+No pragmas are included yet.
+
+3. tb_normalize_weights.cpp
+
+This testbench loads:
+
+a_s_real.csv
+a_s_imag.csv
+
+w_unnorm_real.csv
+w_unnorm_imag.csv
+
+w_real.csv
+w_imag.csv
+
+It verifies:
+
+All files contain exactly 64 values
+
+No result contains NaN or infinity
+
+HLS weights match MATLAB final weights
+
+
+
+
+
+The normalization denominator is not zero
+
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "normalize_weights.h"
+
+using namespace std;
+
+/*
+ * Read all numerical values from a CSV file.
+ *
+ * Handles:
+ *   - one value per line
+ *   - comma-separated values
+ */
+vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr
+            << "ERROR: Cannot open file: "
+            << filename
+            << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Replace commas with spaces.
+         */
+        for (size_t i = 0;
+             i < line.size();
+             i++)
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream line_stream(line);
+        double value;
+
+        while (line_stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * Load one 64 x 1 complex vector.
+ */
+void load_complex_vector(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx output[N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if ((int)real_values.size() != N)
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " must contain exactly "
+            << N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() != N)
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " must contain exactly "
+            << N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    for (int i = 0; i < N; i++)
+    {
+        output[i] = cplx(
+            real_values[i],
+            imag_values[i]
+        );
+    }
+
+    cout
+        << "Vector loaded correctly: "
+        << N << " x 1"
+        << endl;
+}
+
+/*
+ * Check whether one complex value is finite.
+ */
+bool complex_is_finite(
+    cplx value
+)
+{
+    return
+        std::isfinite(value.real()) &&
+        std::isfinite(value.imag());
+}
+
+/*
+ * Check every vector value.
+ */
+bool vector_is_finite(
+    cplx vector_input[N]
+)
+{
+    for (int i = 0; i < N; i++)
+    {
+        if (!complex_is_finite(
+                vector_input[i]
+            ))
+        {
+            cerr
+                << "ERROR: Non-finite value at index "
+                << i
+                << endl;
+
+            cerr
+                << "Value = "
+                << vector_input[i]
+                << endl;
+
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/*
+ * Relative vector error:
+ *
+ * ||result-reference||2
+ * ---------------------
+ *    ||reference||2
+ */
+double relative_vector_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double difference_power = 0.0;
+    double reference_power = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double reference_real =
+            reference[i].real();
+
+        double reference_imag =
+            reference[i].imag();
+
+        difference_power +=
+            difference_real *
+            difference_real +
+            difference_imag *
+            difference_imag;
+
+        reference_power +=
+            reference_real *
+            reference_real +
+            reference_imag *
+            reference_imag;
+    }
+
+    if (reference_power < 1.0e-30)
+    {
+        cerr
+            << "ERROR: MATLAB golden weight "
+            << "vector has zero norm."
+            << endl;
+
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        difference_power /
+        reference_power
+    );
+}
+
+/*
+ * Maximum individual complex-element error.
+ */
+double maximum_element_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double maximum_error = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double element_error =
+            std::sqrt(
+                difference_real *
+                difference_real +
+                difference_imag *
+                difference_imag
+            );
+
+        if (element_error > maximum_error)
+        {
+            maximum_error =
+                element_error;
+        }
+    }
+
+    return maximum_error;
+}
+
+/*
+ * Calculate:
+ *
+ * result = a^H * b
+ *
+ * Testbench only.
+ */
+cplx hermitian_dot_product(
+    cplx a[N],
+    cplx b[N]
+)
+{
+    cplx result =
+        cplx(0.0, 0.0);
+
+    for (int i = 0; i < N; i++)
+    {
+        result +=
+            std::conj(a[i]) *
+            b[i];
+    }
+
+    return result;
+}
+
+/*
+ * Magnitude of a complex value.
+ *
+ * Testbench only.
+ */
+double complex_magnitude(
+    cplx value
+)
+{
+    double real_part =
+        value.real();
+
+    double imag_part =
+        value.imag();
+
+    return std::sqrt(
+        real_part * real_part +
+        imag_part * imag_part
+    );
+}
+
+/*
+ * Euclidean vector norm.
+ *
+ * This is printed only for information.
+ * MVDR normalization does not force this norm to 1.
+ */
+double vector_norm(
+    cplx vector_input[N]
+)
+{
+    double power = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double real_part =
+            vector_input[i].real();
+
+        double imag_part =
+            vector_input[i].imag();
+
+        power +=
+            real_part * real_part +
+            imag_part * imag_part;
+    }
+
+    return std::sqrt(power);
+}
+
+int main()
+{
+    static cplx a_s[N];
+
+    static cplx w_unnorm[N];
+
+    static cplx w_matlab[N];
+    static cplx w_hls[N];
+
+    cout << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "MVDR WEIGHT NORMALIZATION TEST"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    /*
+     * Load target steering vector.
+     */
+    load_complex_vector(
+        "a_s_real.csv",
+        "a_s_imag.csv",
+        a_s
+    );
+
+    /*
+     * Load raw back-substitution output.
+     */
+    load_complex_vector(
+        "w_unnorm_real.csv",
+        "w_unnorm_imag.csv",
+        w_unnorm
+    );
+
+    /*
+     * Load final MATLAB normalized weights.
+     */
+    load_complex_vector(
+        "w_real.csv",
+        "w_imag.csv",
+        w_matlab
+    );
+
+    /*
+     * Check the input normalization factor.
+     */
+    cplx input_denominator =
+        hermitian_dot_product(
+            a_s,
+            w_unnorm
+        );
+
+    double denominator_magnitude =
+        complex_magnitude(
+            input_denominator
+        );
+
+    cout << endl;
+
+    cout
+        << "Input normalization factor "
+        << "a_s^H * w_unnorm = "
+        << input_denominator
+        << endl;
+
+    cout
+        << "Normalization-factor magnitude = "
+        << denominator_magnitude
+        << endl;
+
+    if (!complex_is_finite(
+            input_denominator
+        ) ||
+        denominator_magnitude <
+            1.0e-15)
+    {
+        cerr
+            << "ERROR: Invalid normalization factor."
+            << endl;
+
+        return 1;
+    }
+
+    /*
+     * Run the HLS normalization function.
+     */
+    normalize_weights(
+        a_s,
+        w_unnorm,
+        w_hls
+    );
+
+    /*
+     * Detect NaN or infinity.
+     */
+    if (!vector_is_finite(w_hls))
+    {
+        cout << endl;
+
+        cout
+            << "WEIGHT NORMALIZATION TEST FAILED"
+            << endl;
+
+        return 1;
+    }
+
+    /*
+     * Compare HLS result against MATLAB.
+     */
+    double relative_error =
+        relative_vector_error(
+            w_matlab,
+            w_hls
+        );
+
+    double maximum_error =
+        maximum_element_error(
+            w_matlab,
+            w_hls
+        );
+
+    /*
+     * Verify:
+     *
+     * a_s^H * w_hls should equal 1 + j0
+     */
+    cplx distortionless_response =
+        hermitian_dot_product(
+            a_s,
+            w_hls
+        );
+
+    cplx unity =
+        cplx(1.0, 0.0);
+
+    double response_error =
+        complex_magnitude(
+            distortionless_response -
+            unity
+        );
+
+    /*
+     * Target gain used in your MATLAB:
+     *
+     * abs(w_manual' * a_s)
+     */
+    cplx weight_hermitian_response =
+        hermitian_dot_product(
+            w_hls,
+            a_s
+        );
+
+    double target_gain =
+        complex_magnitude(
+            weight_hermitian_response
+        );
+
+    double target_gain_error =
+        std::fabs(
+            target_gain - 1.0
+        );
+
+    double unnormalized_weight_norm =
+        vector_norm(w_unnorm);
+
+    double normalized_weight_norm =
+        vector_norm(w_hls);
+
+    cout << endl;
+
+    cout
+        << "===== NORMALIZATION RESULTS ====="
+        << endl;
+
+    cout
+        << "Relative weight error     = "
+        << relative_error
+        << endl;
+
+    cout
+        << "Maximum element error     = "
+        << maximum_error
+        << endl;
+
+    cout
+        << "a_s^H * w_hls             = "
+        << distortionless_response
+        << endl;
+
+    cout
+        << "Constraint error          = "
+        << response_error
+        << endl;
+
+    cout
+        << "|w_hls^H * a_s|           = "
+        << target_gain
+        << endl;
+
+    cout
+        << "Target gain error         = "
+        << target_gain_error
+        << endl;
+
+    cout
+        << "Unnormalized weight norm  = "
+        << unnormalized_weight_norm
+        << endl;
+
+    cout
+        << "Normalized weight norm    = "
+        << normalized_weight_norm
+        << endl;
+
+    cout << endl;
+
+    cout
+        << "First five final weights:"
+        << endl;
+
+    for (int i = 0; i < 5; i++)
+    {
+        cout << endl;
+
+        cout
+            << "Index "
+            << i
+            << endl;
+
+        cout
+            << "MATLAB = "
+            << w_matlab[i]
+            << endl;
+
+        cout
+            << "HLS    = "
+            << w_hls[i]
+            << endl;
+    }
+
+    const double TOLERANCE =
+        1.0e-6;
+
+    bool passed =
+        std::isfinite(relative_error) &&
+        std::isfinite(maximum_error) &&
+        std::isfinite(response_error) &&
+        std::isfinite(target_gain) &&
+        relative_error <
+            TOLERANCE &&
+        maximum_error <
+            TOLERANCE &&
+        response_error <
+            TOLERANCE &&
+        target_gain_error <
+            TOLERANCE;
+
+    cout << endl;
+
+    if (passed)
+    {
+        cout
+            << "======================================"
+            << endl;
+
+        cout
+            << "WEIGHT NORMALIZATION TEST PASSED"
+            << endl;
+
+        cout
+            << "======================================"
+            << endl;
+
+        return 0;
+    }
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "WEIGHT NORMALIZATION TEST FAILED"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    return 1;
+}
+
+MATLAB requirement
+
+Your MATLAB code must contain:
+
+y = Q' * a_s;
+
+% Raw back-substitution output
+w_unnorm = back_substitution(Ru, y);
+
+% Final MVDR normalization
+normalization_factor = a_s' * w_unnorm;
+
+w_manual = ...
+    w_unnorm / normalization_factor;
+
+Export both versions:
+
+export_vector('w_unnorm', w_unnorm);
+export_vector('w', w_manual);
+
+This creates:
+
+w_unnorm_real.csv
+w_unnorm_imag.csv
+
+w_real.csv
+w_imag.csv
+
+Folder structure
+
+C:\mvdr_hls\normalization\
+│
+├── normalize_weights.h
+├── normalize_weights.cpp
+├── tb_normalize_weights.cpp
+│
+├── a_s_real.csv
+├── a_s_imag.csv
+├── w_unnorm_real.csv
+├── w_unnorm_imag.csv
+├── w_real.csv
+└── w_imag.csv
+
+Vitis HLS settings
+
+Top function
+
+normalize_weights
+
+Design files
+
+normalize_weights.cpp
+normalize_weights.h
+
+Testbench files
+
+tb_normalize_weights.cpp
+
+a_s_real.csv
+a_s_imag.csv
+
+w_unnorm_real.csv
+w_unnorm_imag.csv
+
+w_real.csv
+w_imag.csv
+
+Run:
+
+1. C Simulation
+2. Confirm WEIGHT NORMALIZATION TEST PASSED
+3. Run C Synthesis
+4. Do not add pragmas yet
+
+The expected important output is approximately:
+
+a_s^H * w_hls   = (1,0)
+|w_hls^H * a_s| = 1
+
+After this block, all individual mathematical stages are available. The next stage is the combined mvdr_top project.
