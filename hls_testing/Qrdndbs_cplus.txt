@@ -1829,3 +1829,146 @@ The calculated HLS output becomes non-finite.
 
 
 After back substitution passes, the next isolated block is normalization. That block converts w_unnorm to the final w_manual, giving target gain approximately 1.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Check it directly in MATLAB. A correct Ru_real.csv should have 64 rows × 64 columns, which equals 4096 numerical values.
+
+Run:
+
+Ru_real_check = readmatrix('Ru_real.csv');
+Ru_imag_check = readmatrix('Ru_imag.csv');
+
+size(Ru_real_check)
+size(Ru_imag_check)
+
+numel(Ru_real_check)
+numel(Ru_imag_check)
+
+Expected output:
+
+ans =
+    64    64
+
+ans =
+    64    64
+
+ans =
+        4096
+
+ans =
+        4096
+
+Also check for missing or invalid values:
+
+sum(isnan(Ru_real_check(:)))
+sum(isnan(Ru_imag_check(:)))
+
+sum(isinf(Ru_real_check(:)))
+sum(isinf(Ru_imag_check(:)))
+
+All four results should be:
+
+0
+
+Important: 64 lines can still mean 4096 values
+
+A 64×64 CSV normally looks like:
+
+value,value,value,... 64 values
+value,value,value,... 64 values
+...
+64 rows
+
+So the file may contain only 64 text lines, but each line contains 64 comma-separated numbers:
+
+64 \times 64 = 4096
+
+Do not judge it by the number of lines alone.
+
+Check the original MATLAB variable before exporting
+
+Run:
+
+size(Ru)
+numel(Ru)
+
+Expected:
+
+ans =
+    64    64
+
+ans =
+        4096
+
+Then export again:
+
+writematrix(real(Ru), 'Ru_real.csv');
+writematrix(imag(Ru), 'Ru_imag.csv');
+
+Immediately verify:
+
+A = readmatrix('Ru_real.csv');
+
+fprintf('Rows    = %d\n', size(A,1));
+fprintf('Columns = %d\n', size(A,2));
+fprintf('Values  = %d\n', numel(A));
+
+Expected:
+
+Rows    = 64
+Columns = 64
+Values  = 4096
+
+Check from your HLS testbench
+
+Your testbench should print:
+
+cout << "Ru real values = "
+     << real_values.size() << endl;
+
+cout << "Ru imag values = "
+     << imag_values.size() << endl;
+
+If MATLAB says 4096 but HLS reports fewer values, then the problem is the CSV parser, not the CSV file.
+
+Use this parser logic:
+
+while (getline(file, line))
+{
+    for (size_t i = 0; i < line.size(); i++)
+    {
+        if (line[i] == ',')
+            line[i] = ' ';
+    }
+
+    stringstream ss(line);
+    double value;
+
+    while (ss >> value)
+        values.push_back(value);
+}
+
+First run this MATLAB command and tell me the output:
+
+[size(readmatrix('Ru_real.csv')) numel(readmatrix('Ru_real.csv'))]
+
+For a correct file, it should display approximately:
+
+64    64    4096
