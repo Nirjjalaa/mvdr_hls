@@ -171,3 +171,133 @@ w_imag.csv
 
 
 and compares the HLS output with your MATLAB golden weights.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+For your project, I would recommend two phases of Vitis HLS workspaces, not one workspace for everything and not a separate workspace forever.
+
+Phase 1: Individual Block Verification (what you've been doing)
+
+Create separate HLS projects/workspaces for each block:
+
+mvdr_hls/
+
+├── steering_vec_hls/
+│   ├── steering_vec.cpp
+│   ├── steering_vec.h
+│   ├── tb_steering.cpp
+│   └── csvs/
+
+├── covariance_hls/
+│   ├── covariance.cpp
+│   ├── covariance.h
+│   ├── tb_covariance.cpp
+│   └── csvs/
+
+├── qrd_hls/
+│   ├── qr.cpp
+│   ├── qr.h
+│   ├── tb_qr.cpp
+│   └── csvs/
+
+├── qh_mul_hls/
+│   ├── qh_mul.cpp
+│   ├── qh_mul.h
+│   ├── tb_qh_mul.cpp
+│   └── csvs/
+
+├── backsub_hls/
+│   ├── backsub.cpp
+│   ├── backsub.h
+│   ├── tb_backsub.cpp
+│   └── csvs/
+
+├── normalize_hls/
+│   ├── normalize.cpp
+│   ├── normalize.h
+│   ├── tb_normalize.cpp
+│   └── csvs/
+
+This is the easiest way to debug each module independently.
+
+
+---
+
+Phase 2: Final MVDR Design
+
+After all blocks pass C simulation and synthesis, create one final HLS project:
+
+mvdr_top_hls/
+
+├── mvdr_top.cpp
+├── mvdr_top.h
+
+├── steering_vec.cpp
+├── steering_vec.h
+
+├── covariance.cpp
+├── covariance.h
+
+├── qr.cpp
+├── qr.h
+
+├── qh_mul.cpp
+├── qh_mul.h
+
+├── backsub.cpp
+├── backsub.h
+
+├── normalize.cpp
+├── normalize.h
+
+├── tb_mvdr_top.cpp
+
+└── csvs/
+    ├── Xtrain_real.csv
+    ├── Xtrain_imag.csv
+    ├── a_s_real.csv
+    ├── a_s_imag.csv
+    ├── w_real.csv
+    └── w_imag.csv
+
+
+---
+
+So the workflow is:
+
+steering_vec_hls      ✓
+covariance_hls        ✓
+qrd_hls               ✓
+qh_mul_hls            ✓
+backsub_hls           ✓
+normalize_hls         ✓
+        ↓
+create
+        ↓
+mvdr_top_hls
+        ↓
+C simulation
+        ↓
+C synthesis
+        ↓
+RTL export
+        ↓
+Versal FPGA
+
+So yes, create separate Vitis HLS projects now for debugging. Later, create one final mvdr_top_hls project that contains all the verified source files together. This is the standard workflow used for FPGA algorithm development.
+
+
+
