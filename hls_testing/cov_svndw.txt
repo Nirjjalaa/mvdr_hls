@@ -1,0 +1,756 @@
+Yes. Since your C++ covariance matrix verification used the MATLAB-generated R, for Vitis HLS we can first create an isolated covariance matrix HLS module:
+
+R=\frac{XX^H}{K}
+
+where:
+
+Xtrain = 64 × 5000
+
+R = 64 × 64
+
+Compare the generated R_hls with your MATLAB R.csv.
+
+
+covariance.h
+
+#ifndef COVARIANCE_H
+#define COVARIANCE_H
+
+#include <hls_complex.h>
+
+#define N 64
+#define K 5000
+
+typedef hls::complex<double> cplx;
+
+void covariance(
+    cplx X[N][K],
+    cplx R[N][N]
+);
+
+#endif
+
+
+---
+
+covariance.cpp
+
+#include "covariance.h"
+
+void covariance(
+    cplx X[N][K],
+    cplx R[N][N]
+)
+{
+#pragma HLS INLINE off
+
+    // initialize R
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+#pragma HLS PIPELINE
+            R[i][j] = cplx(0,0);
+        }
+    }
+
+    // compute covariance
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            cplx sum = cplx(0,0);
+
+            for(int k=0;k<K;k++)
+            {
+#pragma HLS PIPELINE II=1
+                sum += X[i][k] * hls::conj(X[j][k]);
+            }
+
+            R[i][j] = sum / (double)K;
+        }
+    }
+
+    // diagonal loading
+    double trace = 0.0;
+
+    for(int i=0;i<N;i++)
+        trace += R[i][i].real();
+
+    double delta = 0.01 * trace / N;
+
+    for(int i=0;i<N;i++)
+        R[i][i] += cplx(delta,0);
+}
+
+
+---
+
+tb_covariance.cpp
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <cmath>
+#include "covariance.h"
+
+using namespace std;
+
+void load_csv(
+    const char* fname,
+    double arr[][K],
+    int rows,
+    int cols)
+{
+    ifstream file(fname);
+
+    string line;
+
+    for(int i=0;i<rows;i++)
+    {
+        getline(file,line);
+
+        stringstream ss(line);
+        string val;
+
+        for(int j=0;j<cols;j++)
+        {
+            getline(ss,val,',');
+            arr[i][j]=stod(val);
+        }
+    }
+}
+
+int main()
+{
+    static double xr[N][K];
+    static double xi[N][K];
+
+    static double rr[N][N];
+    static double ri[N][N];
+
+    static cplx X[N][K];
+    static cplx R_hls[N][N];
+    static cplx R_gold[N][N];
+
+    load_csv("Xtrain_real.csv",xr,N,K);
+    load_csv("Xtrain_imag.csv",xi,N,K);
+
+    load_csv("R_real.csv",rr,N,N);
+    load_csv("R_imag.csv",ri,N,N);
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<K;j++)
+            X[i][j]=cplx(xr[i][j],xi[i][j]);
+    }
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+            R_gold[i][j]=cplx(rr[i][j],ri[i][j]);
+    }
+
+    covariance(X,R_hls);
+
+    double err=0;
+    double normg=0;
+
+    for(int i=0;i<N;i++)
+    {
+        for(int j=0;j<N;j++)
+        {
+            err += norm(R_hls[i][j]-R_gold[i][j]);
+            normg += norm(R_gold[i][j]);
+        }
+    }
+
+    err = sqrt(err)/sqrt(normg);
+
+    cout<<"Relative error = "<<err<<endl;
+
+    if(err < 1e-6)
+        cout<<"PASS"<<endl;
+    else
+        cout<<"FAIL"<<endl;
+
+    return 0;
+}
+
+
+---
+
+Before running this HLS testbench, you must generate these MATLAB CSVs:
+
+export_matrix('Xtrain', Xtrain);
+export_matrix('R', R);
+
+This gives:
+
+Xtrain_real.csv
+
+Xtrain_imag.csv
+
+R_real.csv
+
+R_imag.csv
+
+
+Then your verification flow becomes:
+
+MATLAB Xtrain
+        ↓
+Vitis HLS covariance()
+        ↓
+R_hls
+        ↓
+Compare with MATLAB R.csv
+        ↓
+PASS
+
+After covariance passes, we move to:
+
+Covariance
+    ↓
+Givens QRD
+    ↓
+Q'H multiplication
+    ↓
+Back substitution
+    ↓
+Weight normalization
+    ↓
+Complete MVDR top
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+For the next MVDR block (), here are the complete Vitis HLS files.
+
+qh_mult.h
+
+#ifndef QH_MULT_H
+#define QH_MULT_H
+
+#include <hls_complex.h>
+
+#define N 64
+
+typedef hls::complex<double> cplx;
+
+void qh_mult(
+    cplx Q[N][N],
+    cplx a[N],
+    cplx y[N]
+);
+
+#endif
+
+
+---
+
+qh_mult.cpp
+
+#include "qh_mult.h"
+
+void qh_mult(
+    cplx Q[N][N],
+    cplx a[N],
+    cplx y[N]
+)
+{
+#pragma HLS INLINE off
+
+    for(int i = 0; i < N; i++)
+    {
+        cplx sum = cplx(0,0);
+
+        for(int j = 0; j < N; j++)
+        {
+#pragma HLS PIPELINE II=1
+            sum += hls::conj(Q[j][i]) * a[j];
+        }
+
+        y[i] = sum;
+    }
+}
+
+
+---
+
+qh_mult_tb.cpp
+
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include "qh_mult.h"
+
+using namespace std;
+
+void load_csv_1d(const char *fname, double x[], int n)
+{
+    ifstream fin(fname);
+
+    for(int i = 0; i < n; i++)
+    {
+        char comma;
+        fin >> x[i];
+        fin >> comma;
+    }
+
+    fin.close();
+}
+
+void load_csv_2d(const char *fname,
+                 double x[N][N])
+{
+    ifstream fin(fname);
+
+    for(int i = 0; i < N; i++)
+    {
+        for(int j = 0; j < N; j++)
+        {
+            char comma;
+            fin >> x[i][j];
+
+            if(j != N-1)
+                fin >> comma;
+        }
+    }
+
+    fin.close();
+}
+
+int main()
+{
+    double re2d[N][N];
+    double im2d[N][N];
+
+    double re1d[N];
+    double im1d[N];
+
+    cplx Q[N][N];
+    cplx a[N];
+    cplx y_hls[N];
+    cplx y_matlab[N];
+
+    // Load Q
+    load_csv_2d("Q_real.csv", re2d);
+    load_csv_2d("Q_imag.csv", im2d);
+
+    for(int i=0;i<N;i++)
+        for(int j=0;j<N;j++)
+            Q[i][j] = cplx(re2d[i][j],
+                           im2d[i][j]);
+
+    // Load steering vector
+    load_csv_1d("a_s_real.csv", re1d, N);
+    load_csv_1d("a_s_imag.csv", im1d, N);
+
+    for(int i=0;i<N;i++)
+        a[i] = cplx(re1d[i], im1d[i]);
+
+    // Load MATLAB y
+    load_csv_1d("y_real.csv", re1d, N);
+    load_csv_1d("y_imag.csv", im1d, N);
+
+    for(int i=0;i<N;i++)
+        y_matlab[i] = cplx(re1d[i], im1d[i]);
+
+    // Run HLS
+    qh_mult(Q, a, y_hls);
+
+    // Compare
+    double err = 0;
+    double norm_ref = 0;
+
+    for(int i=0;i<N;i++)
+    {
+        err += std::norm(y_hls[i] - y_matlab[i]);
+        norm_ref += std::norm(y_matlab[i]);
+    }
+
+    err = sqrt(err)/sqrt(norm_ref);
+
+    cout << "Relative error = "
+         << err << endl;
+
+    cout << "\nFirst 5 elements:\n";
+
+    for(int i=0;i<5;i++)
+    {
+        cout << i << " : "
+             << y_matlab[i]
+             << "    "
+             << y_hls[i]
+             << endl;
+    }
+
+    if(err < 1e-6)
+        cout << "\nPASS\n";
+    else
+        cout << "\nFAIL\n";
+
+    return 0;
+}
+
+Required CSVs
+
+Q_real.csv
+Q_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+
+y_real.csv
+y_imag.csv
+
+After this passes, the next block is weight normalization:
+
+w = \frac{w}{a_s^H w}
+
+which is the last computational block before the complete mvdr_top.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes. After Covariance Matrix, the next MVDR block to implement and verify in Vitis HLS is the Steering Vector Generator.
+
+steering_vec.h
+
+#ifndef STEERING_VEC_H
+#define STEERING_VEC_H
+
+#include <hls_math.h>
+#include <hls_complex.h>
+
+#define NX 8
+#define NY 8
+#define N  64
+#define PI 3.14159265358979323846
+
+typedef hls::complex<double> cplx;
+
+void steering_vec(
+    double az_deg,
+    double el_deg,
+    double d,
+    cplx a[N]
+);
+
+#endif
+
+
+---
+
+steering_vec.cpp
+
+#include "steering_vec.h"
+
+void steering_vec(
+    double az_deg,
+    double el_deg,
+    double d,
+    cplx a[N]
+)
+{
+#pragma HLS INTERFACE ap_ctrl_hs port=return
+
+    double az = az_deg * PI / 180.0;
+    double el = el_deg * PI / 180.0;
+
+    double u = hls::sin(az) * hls::cos(el);
+    double v = hls::sin(el);
+
+    int k = 0;
+
+    for(int y=0; y<NY; y++)
+    {
+        for(int x=0; x<NX; x++)
+        {
+#pragma HLS PIPELINE II=1
+
+            double phase = 2.0*PI*d*(x*u + y*v);
+
+            a[k] = cplx(
+                hls::cos(phase),
+                hls::sin(phase)
+            );
+
+            k++;
+        }
+    }
+
+    double norm = hls::sqrt((double)N);
+
+    for(int i=0;i<N;i++)
+    {
+#pragma HLS PIPELINE II=1
+        a[i] /= norm;
+    }
+}
+
+
+---
+
+tb_steering_vec.cpp
+
+#include <iostream>
+#include <fstream>
+#include "steering_vec.h"
+
+using namespace std;
+
+int main()
+{
+    cplx a_hls[N];
+
+    steering_vec(
+        40.0,   // azimuth
+        0.0,    // elevation
+        0.5,    // spacing
+        a_hls
+    );
+
+    double real_ref[N];
+    double imag_ref[N];
+
+    ifstream fr("a_s_real.csv");
+    ifstream fi("a_s_imag.csv");
+
+    for(int i=0;i<N;i++)
+        fr >> real_ref[i];
+
+    for(int i=0;i<N;i++)
+        fi >> imag_ref[i];
+
+    double err = 0;
+
+    for(int i=0;i<N;i++)
+    {
+        cplx ref(real_ref[i], imag_ref[i]);
+        err += abs(a_hls[i] - ref);
+    }
+
+    err /= N;
+
+    cout << "Average error = "
+         << err << endl;
+
+    if(err < 1e-6)
+        cout << "STEERING VECTOR PASS" << endl;
+    else
+        cout << "STEERING VECTOR FAIL" << endl;
+
+    return 0;
+}
+
+So your Vitis HLS verification blocks are now:
+
+1. ✅ Steering Vector
+
+
+2. ✅ Covariance Matrix
+
+
+3. ✅ Givens QRD
+
+
+4. ✅ Back Substitution
+
+
+
+The next block after these is the MVDR weight computation/top-level mvdr_top integration.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes. After Covariance, QRD, Qᴴ multiplication, Back Substitution, and Steering Vector, the next block is Weight Normalization:
+
+w = \frac{w}{a_s^H w}
+
+This takes the unnormalized weight vector from back substitution and enforces the MVDR constraint.
+
+normalize.h
+
+#ifndef NORMALIZE_H
+#define NORMALIZE_H
+
+#include <hls_complex.h>
+
+#define N 64
+
+typedef hls::complex<double> cplx;
+
+void normalize_weights(
+    cplx w_in[N],
+    cplx a[N],
+    cplx w_out[N]
+);
+
+#endif
+
+
+---
+
+normalize.cpp
+
+#include "normalize.h"
+
+void normalize_weights(
+    cplx w_in[N],
+    cplx a[N],
+    cplx w_out[N]
+)
+{
+    cplx norm_factor = cplx(0.0,0.0);
+
+    // Compute a^H * w
+    for(int i=0;i<N;i++)
+    {
+#pragma HLS PIPELINE
+        norm_factor += conj(a[i]) * w_in[i];
+    }
+
+    // Normalize
+    for(int i=0;i<N;i++)
+    {
+#pragma HLS PIPELINE
+        w_out[i] = w_in[i] / norm_factor;
+    }
+}
+
+
+---
+
+tb_normalize.cpp
+
+#include <iostream>
+#include <fstream>
+#include "normalize.h"
+
+using namespace std;
+
+void load_csv(const char* filename, double data[N])
+{
+    ifstream file(filename);
+
+    for(int i=0;i<N;i++)
+    {
+        char comma;
+        file >> data[i];
+        if(i != N-1)
+            file >> comma;
+    }
+
+    file.close();
+}
+
+int main()
+{
+    cplx w_in[N];
+    cplx a[N];
+    cplx w_gold[N];
+    cplx w_out[N];
+
+    double re[N], im[N];
+
+    // Load unnormalized weights
+    load_csv("w_unnorm_real.csv", re);
+    load_csv("w_unnorm_imag.csv", im);
+    for(int i=0;i<N;i++)
+        w_in[i] = cplx(re[i],im[i]);
+
+    // Load steering vector
+    load_csv("a_s_real.csv", re);
+    load_csv("a_s_imag.csv", im);
+    for(int i=0;i<N;i++)
+        a[i] = cplx(re[i],im[i]);
+
+    // Load MATLAB normalized weights
+    load_csv("w_real.csv", re);
+    load_csv("w_imag.csv", im);
+    for(int i=0;i<N;i++)
+        w_gold[i] = cplx(re[i],im[i]);
+
+    normalize_weights(w_in, a, w_out);
+
+    double err = 0.0;
+
+    for(int i=0;i<N;i++)
+        err += abs(w_out[i] - w_gold[i]);
+
+    err /= N;
+
+    cout << "Average error = " << err << endl;
+
+    if(err < 1e-6)
+        cout << "PASS" << endl;
+    else
+        cout << "FAIL" << endl;
+
+    return 0;
+}
+
+After this, you have all the individual blocks verified:
+
+✅ Steering Vector
+✅ Covariance Matrix
+✅ Givens QRD
+✅ Qᴴ multiplication
+✅ Back Substitution
+✅ Weight Normalization
+
+The next step is to combine them into the top-level mvdr_top() HLS design.
+
+
+
+
+
+
+
+
+
+
+
+
+  
