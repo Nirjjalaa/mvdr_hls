@@ -1,0 +1,173 @@
+Below is the combined top-level MVDR HLS function that connects the blocks you have verified:
+
+Flow:
+
+Xtrain
+   ↓
+Covariance Matrix R
+   ↓
+Givens QR Decomposition
+   ↓
+y = Qᴴ a_s
+   ↓
+Back Substitution
+   ↓
+Weight Normalization
+   ↓
+w_mvdr
+
+mvdr_top.h
+
+#ifndef MVDR_TOP_H
+#define MVDR_TOP_H
+
+#include <hls_complex.h>
+
+#define N 64
+#define K 5000
+
+typedef hls::complex<double> cplx;
+
+void covariance_matrix(
+    cplx X[K][N],
+    cplx R[N][N]
+);
+
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+);
+
+void qh_mul(
+    cplx Q[N][N],
+    cplx a[N],
+    cplx y[N]
+);
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+void normalize_weights(
+    cplx w_in[N],
+    cplx a[N],
+    cplx w_out[N]
+);
+
+void mvdr_top(
+    cplx Xtrain[K][N],
+    cplx a_s[N],
+    cplx w_mvdr[N]
+);
+
+#endif
+
+
+---
+
+mvdr_top.cpp
+
+#include "mvdr_top.h"
+
+void mvdr_top(
+    cplx Xtrain[K][N],
+    cplx a_s[N],
+    cplx w_mvdr[N]
+)
+{
+#pragma HLS INTERFACE ap_memory port=Xtrain
+#pragma HLS INTERFACE ap_memory port=a_s
+#pragma HLS INTERFACE ap_memory port=w_mvdr
+#pragma HLS INTERFACE ap_ctrl_hs port=return
+
+    //--------------------------------------------------
+    // Internal buffers
+    //--------------------------------------------------
+    cplx R[N][N];
+    cplx Q[N][N];
+    cplx Ru[N][N];
+
+    cplx y[N];
+    cplx w_temp[N];
+
+#pragma HLS ARRAY_PARTITION variable=a_s complete
+#pragma HLS ARRAY_PARTITION variable=y complete
+#pragma HLS ARRAY_PARTITION variable=w_temp complete
+#pragma HLS ARRAY_PARTITION variable=w_mvdr complete
+
+    //--------------------------------------------------
+    // Stage 1
+    // Covariance Matrix
+    //--------------------------------------------------
+    covariance_matrix(
+        Xtrain,
+        R
+    );
+
+    //--------------------------------------------------
+    // Stage 2
+    // QR decomposition
+    //--------------------------------------------------
+    givens_qr(
+        R,
+        Q,
+        Ru
+    );
+
+    //--------------------------------------------------
+    // Stage 3
+    // y = Q^H * a_s
+    //--------------------------------------------------
+    qh_mul(
+        Q,
+        a_s,
+        y
+    );
+
+    //--------------------------------------------------
+    // Stage 4
+    // Back substitution
+    //--------------------------------------------------
+    back_substitution(
+        Ru,
+        y,
+        w_temp
+    );
+
+    //--------------------------------------------------
+    // Stage 5
+    // Normalize weights
+    //--------------------------------------------------
+    normalize_weights(
+        w_temp,
+        a_s,
+        w_mvdr
+    );
+}
+
+This mvdr_top() computes the complete MVDR weight vector:
+
+w_{MVDR}
+=
+\frac{R^{-1}a_s}
+{a_s^H R^{-1}a_s}
+
+The only thing left after this is creating tb_mvdr_top.cpp, which loads:
+
+Xtrain_real.csv
+
+Xtrain_imag.csv
+
+a_s_real.csv
+
+a_s_imag.csv
+
+w_real.csv
+
+w_imag.csv
+
+
+and compares the HLS output with your MATLAB golden weights.
