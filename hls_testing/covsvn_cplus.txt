@@ -3771,3 +3771,894 @@ a_s^H * w_hls   = (1,0)
 |w_hls^H * a_s| = 1
 
 After this block, all individual mathematical stages are available. The next stage is the combined mvdr_top project.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+This block computes:
+
+y=Q^Ha_s
+
+For each output element:
+
+y_i=\sum_{j=0}^{63}Q_{j,i}^{*}a_{s,j}
+
+It uses the complex conjugate transpose of Q, not an ordinary transpose. It does not perform back substitution or weight normalization.
+
+Create these three separate files.
+
+
+---
+
+1. qh_multiply.h
+
+#ifndef QH_MULTIPLY_H
+#define QH_MULTIPLY_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<double> cplx;
+
+/*
+ * Computes:
+ *
+ * y = Q^H * a
+ *
+ * Q: 64 x 64 complex matrix
+ * a: 64 x 1 complex steering vector
+ * y: 64 x 1 complex output vector
+ */
+void qh_multiply(
+    const cplx Q[N][N],
+    const cplx a[N],
+    cplx y[N]
+);
+
+#endif
+
+
+---
+
+2. qh_multiply.cpp
+
+This is the synthesizable design file.
+
+It manually performs conjugation and complex multiplication, avoiding std::conj, std::abs, and std::norm inside the hardware function.
+
+#include "qh_multiply.h"
+
+void qh_multiply(
+    const cplx Q[N][N],
+    const cplx a[N],
+    cplx y[N]
+)
+{
+QH_OUTPUT_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+        double sum_real = 0.0;
+        double sum_imag = 0.0;
+
+    QH_ACCUMULATION_LOOP:
+        for (int j = 0; j < N; j++)
+        {
+            /*
+             * Q^H(i,j) = conj(Q(j,i))
+             *
+             * Q(j,i) = qr + j*qi
+             * conj(Q(j,i)) = qr - j*qi
+             *
+             * a(j) = ar + j*ai
+             *
+             * conj(Q(j,i)) * a(j):
+             *
+             * real = qr*ar + qi*ai
+             * imag = qr*ai - qi*ar
+             */
+
+            double qr =
+                Q[j][i].real();
+
+            double qi =
+                Q[j][i].imag();
+
+            double ar =
+                a[j].real();
+
+            double ai =
+                a[j].imag();
+
+            double product_real =
+                qr * ar +
+                qi * ai;
+
+            double product_imag =
+                qr * ai -
+                qi * ar;
+
+            sum_real += product_real;
+            sum_imag += product_imag;
+        }
+
+        y[i] = cplx(
+            sum_real,
+            sum_imag
+        );
+    }
+}
+
+Do not add pragmas yet.
+
+
+---
+
+3. tb_qh_multiply.cpp
+
+This testbench loads:
+
+Q_real.csv
+Q_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+
+y_real.csv
+y_imag.csv
+
+It verifies the complete 64-element HLS output against MATLAB.
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "qh_multiply.h"
+
+using namespace std;
+
+/*
+ * Reads every number from a CSV file.
+ *
+ * Supports:
+ *   - comma-separated matrix rows
+ *   - one-value-per-line vectors
+ */
+vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr
+            << "ERROR: Cannot open file: "
+            << filename
+            << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Convert commas into spaces.
+         */
+        for (size_t i = 0;
+             i < line.size();
+             i++)
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream line_stream(line);
+        double value;
+
+        while (line_stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * Load a 64 x 64 complex matrix.
+ */
+void load_complex_matrix(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx matrix[N][N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    const int expected_values =
+        N * N;
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if ((int)real_values.size() !=
+        expected_values)
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " contains "
+            << real_values.size()
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected "
+            << expected_values
+            << " values for a "
+            << N << " x " << N
+            << " matrix."
+            << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() !=
+        expected_values)
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " contains "
+            << imag_values.size()
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected "
+            << expected_values
+            << " values for a "
+            << N << " x " << N
+            << " matrix."
+            << endl;
+
+        exit(1);
+    }
+
+    int index = 0;
+
+    for (int row = 0;
+         row < N;
+         row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            matrix[row][column] =
+                cplx(
+                    real_values[index],
+                    imag_values[index]
+                );
+
+            index++;
+        }
+    }
+
+    cout
+        << "Matrix loaded correctly: "
+        << N << " x " << N
+        << endl;
+}
+
+/*
+ * Load a 64 x 1 complex vector.
+ */
+void load_complex_vector(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx vector_output[N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if ((int)real_values.size() != N)
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " must contain exactly "
+            << N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() != N)
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " must contain exactly "
+            << N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    for (int i = 0; i < N; i++)
+    {
+        vector_output[i] =
+            cplx(
+                real_values[i],
+                imag_values[i]
+            );
+    }
+
+    cout
+        << "Vector loaded correctly: "
+        << N << " x 1"
+        << endl;
+}
+
+/*
+ * Check whether one complex value is finite.
+ */
+bool complex_is_finite(
+    cplx value
+)
+{
+    return
+        std::isfinite(value.real()) &&
+        std::isfinite(value.imag());
+}
+
+/*
+ * Verify that every output value is finite.
+ */
+bool vector_is_finite(
+    cplx vector_input[N]
+)
+{
+    for (int i = 0; i < N; i++)
+    {
+        if (!complex_is_finite(
+                vector_input[i]
+            ))
+        {
+            cerr
+                << "ERROR: Vector contains NaN "
+                << "or infinity at index "
+                << i
+                << endl;
+
+            cerr
+                << "Value = "
+                << vector_input[i]
+                << endl;
+
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/*
+ * Relative vector error:
+ *
+ * ||result-reference||2
+ * ---------------------
+ *    ||reference||2
+ */
+double relative_vector_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double difference_power = 0.0;
+    double reference_power = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double reference_real =
+            reference[i].real();
+
+        double reference_imag =
+            reference[i].imag();
+
+        difference_power +=
+            difference_real *
+            difference_real +
+            difference_imag *
+            difference_imag;
+
+        reference_power +=
+            reference_real *
+            reference_real +
+            reference_imag *
+            reference_imag;
+    }
+
+    if (reference_power <
+        1.0e-30)
+    {
+        cerr
+            << "ERROR: MATLAB golden y "
+            << "has zero norm."
+            << endl;
+
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        difference_power /
+        reference_power
+    );
+}
+
+/*
+ * Calculate maximum individual element error.
+ */
+double maximum_element_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double maximum_error = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double element_error =
+            std::sqrt(
+                difference_real *
+                difference_real +
+                difference_imag *
+                difference_imag
+            );
+
+        if (element_error >
+            maximum_error)
+        {
+            maximum_error =
+                element_error;
+        }
+    }
+
+    return maximum_error;
+}
+
+/*
+ * Independent testbench calculation:
+ *
+ * y = Q^H * a
+ *
+ * This is not synthesized.
+ */
+void calculate_reference_in_testbench(
+    cplx Q[N][N],
+    cplx a[N],
+    cplx y_reference[N]
+)
+{
+    for (int i = 0; i < N; i++)
+    {
+        cplx sum =
+            cplx(0.0, 0.0);
+
+        for (int j = 0; j < N; j++)
+        {
+            sum +=
+                std::conj(Q[j][i]) *
+                a[j];
+        }
+
+        y_reference[i] = sum;
+    }
+}
+
+int main()
+{
+    static cplx Q[N][N];
+
+    static cplx a_s[N];
+
+    static cplx y_matlab[N];
+    static cplx y_hls[N];
+
+    static cplx y_tb_reference[N];
+
+    cout << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "Q-HERMITIAN MULTIPLICATION TEST"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    /*
+     * Load MATLAB Q matrix.
+     */
+    load_complex_matrix(
+        "Q_real.csv",
+        "Q_imag.csv",
+        Q
+    );
+
+    /*
+     * Load MATLAB target steering vector.
+     */
+    load_complex_vector(
+        "a_s_real.csv",
+        "a_s_imag.csv",
+        a_s
+    );
+
+    /*
+     * Load MATLAB:
+     *
+     * y = Q' * a_s
+     */
+    load_complex_vector(
+        "y_real.csv",
+        "y_imag.csv",
+        y_matlab
+    );
+
+    /*
+     * Execute HLS function.
+     */
+    qh_multiply(
+        Q,
+        a_s,
+        y_hls
+    );
+
+    /*
+     * Independently calculate the same result
+     * in the testbench.
+     */
+    calculate_reference_in_testbench(
+        Q,
+        a_s,
+        y_tb_reference
+    );
+
+    /*
+     * Detect NaN or infinity before computing
+     * relative errors.
+     */
+    if (!vector_is_finite(y_hls))
+    {
+        cout << endl;
+
+        cout
+            << "QH MULTIPLICATION TEST FAILED"
+            << endl;
+
+        return 1;
+    }
+
+    double matlab_relative_error =
+        relative_vector_error(
+            y_matlab,
+            y_hls
+        );
+
+    double testbench_relative_error =
+        relative_vector_error(
+            y_tb_reference,
+            y_hls
+        );
+
+    double maximum_error =
+        maximum_element_error(
+            y_matlab,
+            y_hls
+        );
+
+    cout << endl;
+
+    cout
+        << "===== QH MULTIPLICATION RESULTS ====="
+        << endl;
+
+    cout
+        << "MATLAB relative error   = "
+        << matlab_relative_error
+        << endl;
+
+    cout
+        << "Testbench relative error= "
+        << testbench_relative_error
+        << endl;
+
+    cout
+        << "Maximum element error   = "
+        << maximum_error
+        << endl;
+
+    cout << endl;
+
+    cout
+        << "First five y values:"
+        << endl;
+
+    for (int i = 0; i < 5; i++)
+    {
+        cout << endl;
+
+        cout
+            << "Index "
+            << i
+            << endl;
+
+        cout
+            << "MATLAB = "
+            << y_matlab[i]
+            << endl;
+
+        cout
+            << "HLS    = "
+            << y_hls[i]
+            << endl;
+
+        cout
+            << "TB ref = "
+            << y_tb_reference[i]
+            << endl;
+    }
+
+    /*
+     * Double-precision initial verification.
+     */
+    const double TOLERANCE =
+        1.0e-8;
+
+    bool passed =
+        std::isfinite(
+            matlab_relative_error
+        ) &&
+        std::isfinite(
+            testbench_relative_error
+        ) &&
+        std::isfinite(
+            maximum_error
+        ) &&
+        matlab_relative_error <
+            TOLERANCE &&
+        testbench_relative_error <
+            TOLERANCE &&
+        maximum_error <
+            TOLERANCE;
+
+    cout << endl;
+
+    if (passed)
+    {
+        cout
+            << "======================================"
+            << endl;
+
+        cout
+            << "QH MULTIPLICATION TEST PASSED"
+            << endl;
+
+        cout
+            << "======================================"
+            << endl;
+
+        return 0;
+    }
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "QH MULTIPLICATION TEST FAILED"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    return 1;
+}
+
+The testbench uses standard complex functions only in nonsynthesized validation code. AMD recommends self-checking C testbenches that return 0 when the result passes and a nonzero value when it fails. 
+
+
+---
+
+Required CSV files
+
+Q_real.csv
+Q_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+
+y_real.csv
+y_imag.csv
+
+Expected dimensions:
+
+Q_real.csv → 64 × 64 = 4096 values
+Q_imag.csv → 64 × 64 = 4096 values
+
+a_s_real.csv → 64 × 1 = 64 values
+a_s_imag.csv → 64 × 1 = 64 values
+
+y_real.csv → 64 × 1 = 64 values
+y_imag.csv → 64 × 1 = 64 values
+
+Check in MATLAB:
+
+Qr = readmatrix('Q_real.csv');
+Qi = readmatrix('Q_imag.csv');
+
+Ar = readmatrix('a_s_real.csv');
+Ai = readmatrix('a_s_imag.csv');
+
+Yr = readmatrix('y_real.csv');
+Yi = readmatrix('y_imag.csv');
+
+fprintf('Q real: %d x %d, values = %d\n', ...
+    size(Qr,1), size(Qr,2), numel(Qr));
+
+fprintf('Q imag: %d x %d, values = %d\n', ...
+    size(Qi,1), size(Qi,2), numel(Qi));
+
+fprintf('a_s real: %d x %d, values = %d\n', ...
+    size(Ar,1), size(Ar,2), numel(Ar));
+
+fprintf('a_s imag: %d x %d, values = %d\n', ...
+    size(Ai,1), size(Ai,2), numel(Ai));
+
+fprintf('y real: %d x %d, values = %d\n', ...
+    size(Yr,1), size(Yr,2), numel(Yr));
+
+fprintf('y imag: %d x %d, values = %d\n', ...
+    size(Yi,1), size(Yi,2), numel(Yi));
+
+
+---
+
+Folder structure
+
+C:\mvdr_hls\qh_multiply\
+│
+├── qh_multiply.h
+├── qh_multiply.cpp
+├── tb_qh_multiply.cpp
+│
+├── Q_real.csv
+├── Q_imag.csv
+├── a_s_real.csv
+├── a_s_imag.csv
+├── y_real.csv
+└── y_imag.csv
+
+Vitis HLS settings
+
+Top function
+
+qh_multiply
+
+Design files
+
+qh_multiply.cpp
+qh_multiply.h
+
+Testbench files
+
+tb_qh_multiply.cpp
+Q_real.csv
+Q_imag.csv
+a_s_real.csv
+a_s_imag.csv
+y_real.csv
+y_imag.csv
+
+Continue with std::complex<double> because that is the type recognized in your installation; AMD documentation identifies std::complex<T> as a supported way of representing complex signals in Vitis HLS-related C++ flows. 
+
+Run:
+
+1. C Simulation
+2. Confirm QH MULTIPLICATION TEST PASSED
+3. C Synthesis
+4. No pragmas yet
+
+After this, the next isolated block is weight normalization:
+
+w_unnorm + a_s
+        ↓
+w = w_unnorm / (a_sᴴw_unnorm)
