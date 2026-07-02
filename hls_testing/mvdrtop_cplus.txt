@@ -1,0 +1,1647 @@
+This is the combined MVDR weight-generation top:
+
+Xtrain
+   ↓
+Steering vector a_s
+   ↓
+Covariance R + diagonal loading
+   ↓
+Complex Givens QRD: R = Q·Ru
+   ↓
+y = Qᴴa_s
+   ↓
+Back substitution
+   ↓
+w_unnorm
+   ↓
+MVDR normalization
+   ↓
+Final w_mvdr
+
+This version is self-contained. Do not add the earlier isolated qr.cpp, backsub.cpp, etc. to this project, because the same functions are included internally in mvdr_top.cpp.
+
+Vitis HLS synthesizes the functions called by the selected top function, so internal helper functions are included in the generated RTL. 
+
+
+---
+
+1. mvdr_top.h
+
+#ifndef MVDR_TOP_H
+#define MVDR_TOP_H
+
+#include <complex>
+
+#define MVDR_NX 8
+#define MVDR_NY 8
+#define MVDR_N  64
+#define MVDR_K  5000
+
+#define MVDR_PI 3.14159265358979323846
+
+typedef std::complex<double> mvdr_cplx;
+
+/*
+ * Complete MVDR weight-generation pipeline.
+ *
+ * Inputs:
+ *   Xtrain = 64 x 5000 complex training-data matrix
+ *   az_deg = desired target azimuth
+ *   el_deg = desired target elevation
+ *   d      = antenna-element spacing in wavelengths
+ *
+ * Output:
+ *   w_out = 64 x 1 normalized MVDR weight vector
+ */
+void mvdr_top(
+    const mvdr_cplx Xtrain[MVDR_N][MVDR_K],
+    double az_deg,
+    double el_deg,
+    double d,
+    mvdr_cplx w_out[MVDR_N]
+);
+
+#endif
+
+
+---
+
+2. mvdr_top.cpp
+
+#include "mvdr_top.h"
+#include <cmath>
+
+/*
+ * =====================================================
+ * BASIC COMPLEX ARITHMETIC
+ * =====================================================
+ *
+ * These helper functions avoid std::abs(complex),
+ * std::conj(complex) and std::norm(complex) inside
+ * synthesizable code.
+ */
+
+static mvdr_cplx complex_add(
+    mvdr_cplx a,
+    mvdr_cplx b
+)
+{
+    return mvdr_cplx(
+        a.real() + b.real(),
+        a.imag() + b.imag()
+    );
+}
+
+static mvdr_cplx complex_subtract(
+    mvdr_cplx a,
+    mvdr_cplx b
+)
+{
+    return mvdr_cplx(
+        a.real() - b.real(),
+        a.imag() - b.imag()
+    );
+}
+
+static mvdr_cplx complex_multiply(
+    mvdr_cplx a,
+    mvdr_cplx b
+)
+{
+    double ar = a.real();
+    double ai = a.imag();
+
+    double br = b.real();
+    double bi = b.imag();
+
+    return mvdr_cplx(
+        ar * br - ai * bi,
+        ar * bi + ai * br
+    );
+}
+
+static mvdr_cplx complex_scale(
+    mvdr_cplx a,
+    double scale
+)
+{
+    return mvdr_cplx(
+        a.real() * scale,
+        a.imag() * scale
+    );
+}
+
+static mvdr_cplx complex_conjugate(
+    mvdr_cplx a
+)
+{
+    return mvdr_cplx(
+        a.real(),
+        -a.imag()
+    );
+}
+
+static double complex_magnitude_squared(
+    mvdr_cplx a
+)
+{
+    double real_part = a.real();
+    double imag_part = a.imag();
+
+    return
+        real_part * real_part +
+        imag_part * imag_part;
+}
+
+static double complex_magnitude(
+    mvdr_cplx a
+)
+{
+    return std::sqrt(
+        complex_magnitude_squared(a)
+    );
+}
+
+/*
+ * Divide a complex number by a real number.
+ */
+static mvdr_cplx complex_divide_real(
+    mvdr_cplx numerator,
+    double denominator
+)
+{
+    if (
+        denominator > -1.0e-30 &&
+        denominator < 1.0e-30
+    )
+    {
+        return mvdr_cplx(0.0, 0.0);
+    }
+
+    return mvdr_cplx(
+        numerator.real() / denominator,
+        numerator.imag() / denominator
+    );
+}
+
+/*
+ * Complex division:
+ *
+ * (nr + j*ni) / (dr + j*di)
+ */
+static mvdr_cplx complex_divide(
+    mvdr_cplx numerator,
+    mvdr_cplx denominator
+)
+{
+    double nr = numerator.real();
+    double ni = numerator.imag();
+
+    double dr = denominator.real();
+    double di = denominator.imag();
+
+    double denominator_power =
+        dr * dr +
+        di * di;
+
+    if (denominator_power < 1.0e-30)
+    {
+        return mvdr_cplx(0.0, 0.0);
+    }
+
+    return mvdr_cplx(
+        (nr * dr + ni * di) /
+            denominator_power,
+
+        (ni * dr - nr * di) /
+            denominator_power
+    );
+}
+
+/*
+ * =====================================================
+ * STAGE 1: STEERING VECTOR
+ * =====================================================
+ */
+
+static void steering_vec_internal(
+    double az_deg,
+    double el_deg,
+    double d,
+    mvdr_cplx a[MVDR_N]
+)
+{
+    double az =
+        az_deg * MVDR_PI / 180.0;
+
+    double el =
+        el_deg * MVDR_PI / 180.0;
+
+    double u =
+        std::sin(az) *
+        std::cos(el);
+
+    double v =
+        std::sin(el);
+
+    /*
+     * 1 / sqrt(64) = 0.125
+     */
+    const double normalization =
+        0.125;
+
+    int index = 0;
+
+STEERING_Y:
+    for (int y = 0; y < MVDR_NY; y++)
+    {
+    STEERING_X:
+        for (int x = 0; x < MVDR_NX; x++)
+        {
+            double phase =
+                2.0 *
+                MVDR_PI *
+                d *
+                (
+                    (double)x * u +
+                    (double)y * v
+                );
+
+            a[index] = mvdr_cplx(
+                normalization *
+                    std::cos(phase),
+
+                normalization *
+                    std::sin(phase)
+            );
+
+            index++;
+        }
+    }
+}
+
+/*
+ * =====================================================
+ * STAGE 2: COVARIANCE MATRIX
+ * =====================================================
+ *
+ * R = Xtrain * Xtrain^H / K
+ *
+ * followed by:
+ *
+ * delta = 0.01 * trace(R) / N
+ * R = R + delta * I
+ */
+
+static void covariance_internal(
+    const mvdr_cplx
+        Xtrain[MVDR_N][MVDR_K],
+
+    mvdr_cplx
+        R[MVDR_N][MVDR_N]
+)
+{
+    const double inverse_K =
+        1.0 / (double)MVDR_K;
+
+COVARIANCE_ROW:
+    for (int i = 0; i < MVDR_N; i++)
+    {
+    COVARIANCE_COLUMN:
+        for (int j = 0; j < MVDR_N; j++)
+        {
+            double sum_real = 0.0;
+            double sum_imag = 0.0;
+
+        SNAPSHOT_LOOP:
+            for (
+                int k = 0;
+                k < MVDR_K;
+                k++
+            )
+            {
+                double ar =
+                    Xtrain[i][k].real();
+
+                double ai =
+                    Xtrain[i][k].imag();
+
+                double br =
+                    Xtrain[j][k].real();
+
+                double bi =
+                    Xtrain[j][k].imag();
+
+                /*
+                 * Xtrain(i,k) *
+                 * conj(Xtrain(j,k))
+                 */
+                sum_real +=
+                    ar * br +
+                    ai * bi;
+
+                sum_imag +=
+                    ai * br -
+                    ar * bi;
+            }
+
+            R[i][j] = mvdr_cplx(
+                sum_real * inverse_K,
+                sum_imag * inverse_K
+            );
+        }
+    }
+
+    /*
+     * Diagonal loading.
+     */
+    double trace_real = 0.0;
+
+TRACE_LOOP:
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        trace_real +=
+            R[i][i].real();
+    }
+
+    double delta =
+        0.01 *
+        trace_real /
+        (double)MVDR_N;
+
+DIAGONAL_LOADING:
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        R[i][i] = mvdr_cplx(
+            R[i][i].real() +
+                delta,
+
+            R[i][i].imag()
+        );
+    }
+}
+
+/*
+ * =====================================================
+ * STAGE 3: COMPLEX GIVENS QR DECOMPOSITION
+ * =====================================================
+ *
+ * Input:
+ *   A
+ *
+ * Outputs:
+ *   Q
+ *   Ru
+ *
+ * Relationship:
+ *   A = Q * Ru
+ */
+
+static void givens_qr_internal(
+    const mvdr_cplx
+        A[MVDR_N][MVDR_N],
+
+    mvdr_cplx
+        Q[MVDR_N][MVDR_N],
+
+    mvdr_cplx
+        Ru[MVDR_N][MVDR_N]
+)
+{
+    const double EPS =
+        1.0e-12;
+
+    const double EPS_SQUARED =
+        1.0e-24;
+
+    /*
+     * Initialize:
+     *
+     * Ru = A
+     * Q  = identity matrix
+     */
+QR_INITIALIZE_ROW:
+    for (int row = 0; row < MVDR_N; row++)
+    {
+    QR_INITIALIZE_COLUMN:
+        for (
+            int column = 0;
+            column < MVDR_N;
+            column++
+        )
+        {
+            Ru[row][column] =
+                A[row][column];
+
+            if (row == column)
+            {
+                Q[row][column] =
+                    mvdr_cplx(
+                        1.0,
+                        0.0
+                    );
+            }
+            else
+            {
+                Q[row][column] =
+                    mvdr_cplx(
+                        0.0,
+                        0.0
+                    );
+            }
+        }
+    }
+
+QR_COLUMN_LOOP:
+    for (int j = 0; j < MVDR_N; j++)
+    {
+    QR_ROW_LOOP:
+        for (
+            int i = MVDR_N - 1;
+            i > j;
+            i--
+        )
+        {
+            double lower_magnitude_squared =
+                complex_magnitude_squared(
+                    Ru[i][j]
+                );
+
+            if (
+                lower_magnitude_squared >
+                EPS_SQUARED
+            )
+            {
+                mvdr_cplx a =
+                    Ru[i - 1][j];
+
+                mvdr_cplx b =
+                    Ru[i][j];
+
+                double magnitude_a =
+                    complex_magnitude(a);
+
+                double rotation_norm =
+                    std::sqrt(
+                        magnitude_a *
+                        magnitude_a +
+
+                        complex_magnitude_squared(
+                            b
+                        )
+                    );
+
+                if (rotation_norm > EPS)
+                {
+                    /*
+                     * c is real.
+                     */
+                    double c =
+                        magnitude_a /
+                        rotation_norm;
+
+                    /*
+                     * alpha = a / |a|
+                     */
+                    mvdr_cplx alpha;
+
+                    if (magnitude_a < EPS)
+                    {
+                        alpha =
+                            mvdr_cplx(
+                                1.0,
+                                0.0
+                            );
+                    }
+                    else
+                    {
+                        alpha =
+                            complex_divide_real(
+                                a,
+                                magnitude_a
+                            );
+                    }
+
+                    /*
+                     * s =
+                     * alpha * conj(b) / r
+                     *
+                     * s is complex.
+                     */
+                    mvdr_cplx s =
+                        complex_divide_real(
+                            complex_multiply(
+                                alpha,
+                                complex_conjugate(
+                                    b
+                                )
+                            ),
+
+                            rotation_norm
+                        );
+
+                    mvdr_cplx conjugate_s =
+                        complex_conjugate(s);
+
+                    /*
+                     * Update Ru:
+                     *
+                     * [upper_new]
+                     * [lower_new]
+                     *
+                     * =
+                     *
+                     * [c          s       ]
+                     * [-conj(s)   c       ]
+                     *
+                     * [upper_old]
+                     * [lower_old]
+                     */
+                UPDATE_RU:
+                    for (
+                        int k = j;
+                        k < MVDR_N;
+                        k++
+                    )
+                    {
+                        mvdr_cplx upper_old =
+                            Ru[i - 1][k];
+
+                        mvdr_cplx lower_old =
+                            Ru[i][k];
+
+                        mvdr_cplx upper_new =
+                            complex_add(
+                                complex_scale(
+                                    upper_old,
+                                    c
+                                ),
+
+                                complex_multiply(
+                                    s,
+                                    lower_old
+                                )
+                            );
+
+                        mvdr_cplx lower_new =
+                            complex_subtract(
+                                complex_scale(
+                                    lower_old,
+                                    c
+                                ),
+
+                                complex_multiply(
+                                    conjugate_s,
+                                    upper_old
+                                )
+                            );
+
+                        Ru[i - 1][k] =
+                            upper_new;
+
+                        Ru[i][k] =
+                            lower_new;
+                    }
+
+                    /*
+                     * Force eliminated element to zero.
+                     */
+                    Ru[i][j] =
+                        mvdr_cplx(
+                            0.0,
+                            0.0
+                        );
+
+                    /*
+                     * Update:
+                     *
+                     * Q = Q * G^H
+                     */
+                UPDATE_Q:
+                    for (
+                        int k = 0;
+                        k < MVDR_N;
+                        k++
+                    )
+                    {
+                        mvdr_cplx left_old =
+                            Q[k][i - 1];
+
+                        mvdr_cplx right_old =
+                            Q[k][i];
+
+                        mvdr_cplx left_new =
+                            complex_add(
+                                complex_scale(
+                                    left_old,
+                                    c
+                                ),
+
+                                complex_multiply(
+                                    conjugate_s,
+                                    right_old
+                                )
+                            );
+
+                        mvdr_cplx right_new =
+                            complex_subtract(
+                                complex_scale(
+                                    right_old,
+                                    c
+                                ),
+
+                                complex_multiply(
+                                    s,
+                                    left_old
+                                )
+                            );
+
+                        Q[k][i - 1] =
+                            left_new;
+
+                        Q[k][i] =
+                            right_new;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/*
+ * =====================================================
+ * STAGE 4: y = Q^H * a
+ * =====================================================
+ */
+
+static void qh_multiply_internal(
+    const mvdr_cplx
+        Q[MVDR_N][MVDR_N],
+
+    const mvdr_cplx
+        a[MVDR_N],
+
+    mvdr_cplx
+        y[MVDR_N]
+)
+{
+QH_OUTPUT:
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        double sum_real = 0.0;
+        double sum_imag = 0.0;
+
+    QH_ACCUMULATION:
+        for (int j = 0; j < MVDR_N; j++)
+        {
+            /*
+             * conj(Q[j][i]) * a[j]
+             */
+            double qr =
+                Q[j][i].real();
+
+            double qi =
+                Q[j][i].imag();
+
+            double ar =
+                a[j].real();
+
+            double ai =
+                a[j].imag();
+
+            sum_real +=
+                qr * ar +
+                qi * ai;
+
+            sum_imag +=
+                qr * ai -
+                qi * ar;
+        }
+
+        y[i] = mvdr_cplx(
+            sum_real,
+            sum_imag
+        );
+    }
+}
+
+/*
+ * =====================================================
+ * STAGE 5: BACK SUBSTITUTION
+ * =====================================================
+ *
+ * Solve:
+ *
+ * Ru * w_unnorm = y
+ */
+
+static void back_substitution_internal(
+    const mvdr_cplx
+        Ru[MVDR_N][MVDR_N],
+
+    const mvdr_cplx
+        b[MVDR_N],
+
+    mvdr_cplx
+        x[MVDR_N]
+)
+{
+BACKSUB_OUTER:
+    for (
+        int i = MVDR_N - 1;
+        i >= 0;
+        i--
+    )
+    {
+        mvdr_cplx sum =
+            b[i];
+
+    BACKSUB_INNER:
+        for (
+            int j = i + 1;
+            j < MVDR_N;
+            j++
+        )
+        {
+            sum =
+                complex_subtract(
+                    sum,
+
+                    complex_multiply(
+                        Ru[i][j],
+                        x[j]
+                    )
+                );
+        }
+
+        x[i] =
+            complex_divide(
+                sum,
+                Ru[i][i]
+            );
+    }
+}
+
+/*
+ * =====================================================
+ * STAGE 6: MVDR WEIGHT NORMALIZATION
+ * =====================================================
+ *
+ * denominator = a^H * w_unnorm
+ *
+ * w_out = w_unnorm / denominator
+ */
+
+static void normalize_weights_internal(
+    const mvdr_cplx
+        a[MVDR_N],
+
+    const mvdr_cplx
+        w_in[MVDR_N],
+
+    mvdr_cplx
+        w_out[MVDR_N]
+)
+{
+    double denominator_real = 0.0;
+    double denominator_imag = 0.0;
+
+NORMALIZATION_DOT_PRODUCT:
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        double ar =
+            a[i].real();
+
+        double ai =
+            a[i].imag();
+
+        double wr =
+            w_in[i].real();
+
+        double wi =
+            w_in[i].imag();
+
+        /*
+         * conj(a) * w
+         */
+        denominator_real +=
+            ar * wr +
+            ai * wi;
+
+        denominator_imag +=
+            ar * wi -
+            ai * wr;
+    }
+
+    mvdr_cplx denominator(
+        denominator_real,
+        denominator_imag
+    );
+
+NORMALIZE_OUTPUT:
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        w_out[i] =
+            complex_divide(
+                w_in[i],
+                denominator
+            );
+    }
+}
+
+/*
+ * =====================================================
+ * TOP-LEVEL MVDR FUNCTION
+ * =====================================================
+ */
+
+void mvdr_top(
+    const mvdr_cplx
+        Xtrain[MVDR_N][MVDR_K],
+
+    double az_deg,
+    double el_deg,
+    double d,
+
+    mvdr_cplx
+        w_out[MVDR_N]
+)
+{
+    mvdr_cplx
+        a_s[MVDR_N];
+
+    mvdr_cplx
+        R[MVDR_N][MVDR_N];
+
+    mvdr_cplx
+        Q[MVDR_N][MVDR_N];
+
+    mvdr_cplx
+        Ru[MVDR_N][MVDR_N];
+
+    mvdr_cplx
+        y[MVDR_N];
+
+    mvdr_cplx
+        w_unnorm[MVDR_N];
+
+    /*
+     * Stage 1
+     */
+    steering_vec_internal(
+        az_deg,
+        el_deg,
+        d,
+        a_s
+    );
+
+    /*
+     * Stage 2
+     */
+    covariance_internal(
+        Xtrain,
+        R
+    );
+
+    /*
+     * Stage 3
+     */
+    givens_qr_internal(
+        R,
+        Q,
+        Ru
+    );
+
+    /*
+     * Stage 4
+     */
+    qh_multiply_internal(
+        Q,
+        a_s,
+        y
+    );
+
+    /*
+     * Stage 5
+     */
+    back_substitution_internal(
+        Ru,
+        y,
+        w_unnorm
+    );
+
+    /*
+     * Stage 6
+     */
+    normalize_weights_internal(
+        a_s,
+        w_unnorm,
+        w_out
+    );
+}
+
+
+---
+
+
+
+
+test bench:
+tb_mvdr_top.cpp
+
+
+
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "mvdr_top.h"
+
+using namespace std;
+
+/*
+ * Read all values from one CSV file.
+ */
+static vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr
+            << "ERROR: Cannot open file: "
+            << filename
+            << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Convert commas to spaces.
+         */
+        for (
+            size_t i = 0;
+            i < line.size();
+            i++
+        )
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream line_stream(line);
+        double value;
+
+        while (line_stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * Load 64 x 5000 Xtrain.
+ */
+static void load_xtrain(
+    const char* real_filename,
+    const char* imag_filename,
+
+    mvdr_cplx
+        Xtrain[MVDR_N][MVDR_K]
+)
+{
+    vector<double> real_values =
+        read_csv_values(
+            real_filename
+        );
+
+    vector<double> imag_values =
+        read_csv_values(
+            imag_filename
+        );
+
+    const int expected_values =
+        MVDR_N * MVDR_K;
+
+    cout
+        << real_filename
+        << " values = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values = "
+        << imag_values.size()
+        << endl;
+
+    if (
+        (int)real_values.size() !=
+            expected_values ||
+
+        (int)imag_values.size() !=
+            expected_values
+    )
+    {
+        cerr
+            << "ERROR: Xtrain files must each "
+            << "contain "
+            << expected_values
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    int index = 0;
+
+    for (
+        int row = 0;
+        row < MVDR_N;
+        row++
+    )
+    {
+        for (
+            int column = 0;
+            column < MVDR_K;
+            column++
+        )
+        {
+            Xtrain[row][column] =
+                mvdr_cplx(
+                    real_values[index],
+                    imag_values[index]
+                );
+
+            index++;
+        }
+    }
+
+    cout
+        << "Xtrain loaded successfully: "
+        << MVDR_N
+        << " x "
+        << MVDR_K
+        << endl;
+}
+
+/*
+ * Load one 64-element complex vector.
+ */
+static void load_vector(
+    const char* real_filename,
+    const char* imag_filename,
+
+    mvdr_cplx
+        output[MVDR_N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(
+            real_filename
+        );
+
+    vector<double> imag_values =
+        read_csv_values(
+            imag_filename
+        );
+
+    cout
+        << real_filename
+        << " values = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values = "
+        << imag_values.size()
+        << endl;
+
+    if (
+        (int)real_values.size() !=
+            MVDR_N ||
+
+        (int)imag_values.size() !=
+            MVDR_N
+    )
+    {
+        cerr
+            << "ERROR: Vector files must each "
+            << "contain "
+            << MVDR_N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        output[i] =
+            mvdr_cplx(
+                real_values[i],
+                imag_values[i]
+            );
+    }
+
+    cout
+        << "Vector loaded successfully: "
+        << MVDR_N
+        << " x 1"
+        << endl;
+}
+
+static bool complex_is_finite(
+    mvdr_cplx value
+)
+{
+    return
+        std::isfinite(value.real()) &&
+        std::isfinite(value.imag());
+}
+
+/*
+ * Relative weight error.
+ */
+static double relative_vector_error(
+    const mvdr_cplx
+        reference[MVDR_N],
+
+    const mvdr_cplx
+        result[MVDR_N]
+)
+{
+    double difference_power = 0.0;
+    double reference_power = 0.0;
+
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        if (!complex_is_finite(result[i]))
+        {
+            cerr
+                << "ERROR: Non-finite output "
+                << "at index "
+                << i
+                << endl;
+
+            return
+                numeric_limits<double>::infinity();
+        }
+
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double reference_real =
+            reference[i].real();
+
+        double reference_imag =
+            reference[i].imag();
+
+        difference_power +=
+            difference_real *
+            difference_real +
+
+            difference_imag *
+            difference_imag;
+
+        reference_power +=
+            reference_real *
+            reference_real +
+
+            reference_imag *
+            reference_imag;
+    }
+
+    if (reference_power < 1.0e-30)
+    {
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        difference_power /
+        reference_power
+    );
+}
+
+/*
+ * Maximum error of one complex weight.
+ */
+static double maximum_element_error(
+    const mvdr_cplx
+        reference[MVDR_N],
+
+    const mvdr_cplx
+        result[MVDR_N]
+)
+{
+    double maximum_error = 0.0;
+
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double error =
+            std::sqrt(
+                difference_real *
+                difference_real +
+
+                difference_imag *
+                difference_imag
+            );
+
+        if (error > maximum_error)
+        {
+            maximum_error = error;
+        }
+    }
+
+    return maximum_error;
+}
+
+/*
+ * Testbench-only Hermitian dot product:
+ *
+ * result = a^H * b
+ */
+static mvdr_cplx hermitian_dot(
+    const mvdr_cplx
+        a[MVDR_N],
+
+    const mvdr_cplx
+        b[MVDR_N]
+)
+{
+    mvdr_cplx sum(
+        0.0,
+        0.0
+    );
+
+    for (int i = 0; i < MVDR_N; i++)
+    {
+        sum +=
+            std::conj(a[i]) *
+            b[i];
+    }
+
+    return sum;
+}
+
+static double complex_magnitude(
+    mvdr_cplx value
+)
+{
+    return std::sqrt(
+        value.real() *
+        value.real() +
+
+        value.imag() *
+        value.imag()
+    );
+}
+
+int main()
+{
+    static mvdr_cplx
+        Xtrain[MVDR_N][MVDR_K];
+
+    static mvdr_cplx
+        w_matlab[MVDR_N];
+
+    static mvdr_cplx
+        w_hls[MVDR_N];
+
+    static mvdr_cplx
+        a_s_matlab[MVDR_N];
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "COMBINED MVDR TOP VERIFICATION"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    /*
+     * Load complete training data.
+     */
+    load_xtrain(
+        "Xtrain_real.csv",
+        "Xtrain_imag.csv",
+        Xtrain
+    );
+
+    /*
+     * Load final normalized MATLAB weights.
+     */
+    load_vector(
+        "w_real.csv",
+        "w_imag.csv",
+        w_matlab
+    );
+
+    /*
+     * Load MATLAB target steering vector for
+     * final gain verification.
+     */
+    load_vector(
+        "a_s_real.csv",
+        "a_s_imag.csv",
+        a_s_matlab
+    );
+
+    /*
+     * Target:
+     *
+     * azimuth   = 40 degrees
+     * elevation = 0 degrees
+     * spacing   = 0.5 wavelength
+     */
+    mvdr_top(
+        Xtrain,
+        40.0,
+        0.0,
+        0.5,
+        w_hls
+    );
+
+    double relative_error =
+        relative_vector_error(
+            w_matlab,
+            w_hls
+        );
+
+    double maximum_error =
+        maximum_element_error(
+            w_matlab,
+            w_hls
+        );
+
+    /*
+     * Verify:
+     *
+     * a_s^H w = 1
+     */
+    mvdr_cplx constraint =
+        hermitian_dot(
+            a_s_matlab,
+            w_hls
+        );
+
+    double constraint_error =
+        complex_magnitude(
+            constraint -
+            mvdr_cplx(
+                1.0,
+                0.0
+            )
+        );
+
+    /*
+     * MATLAB target gain:
+     *
+     * abs(w' * a_s)
+     */
+    mvdr_cplx target_response =
+        hermitian_dot(
+            w_hls,
+            a_s_matlab
+        );
+
+    double target_gain =
+        complex_magnitude(
+            target_response
+        );
+
+    double target_gain_error =
+        std::fabs(
+            target_gain - 1.0
+        );
+
+    cout << endl;
+
+    cout
+        << "===== MVDR TOP RESULTS ====="
+        << endl;
+
+    cout
+        << "Relative weight error = "
+        << relative_error
+        << endl;
+
+    cout
+        << "Maximum element error = "
+        << maximum_error
+        << endl;
+
+    cout
+        << "a_s^H * w_hls         = "
+        << constraint
+        << endl;
+
+    cout
+        << "Constraint error      = "
+        << constraint_error
+        << endl;
+
+    cout
+        << "|w_hls^H * a_s|       = "
+        << target_gain
+        << endl;
+
+    cout
+        << "Target gain error     = "
+        << target_gain_error
+        << endl;
+
+    cout << endl;
+
+    cout
+        << "First five final weights:"
+        << endl;
+
+    for (int i = 0; i < 5; i++)
+    {
+        cout << endl;
+
+        cout
+            << "Index "
+            << i
+            << endl;
+
+        cout
+            << "MATLAB = "
+            << w_matlab[i]
+            << endl;
+
+        cout
+            << "HLS    = "
+            << w_hls[i]
+            << endl;
+    }
+
+    const double TOLERANCE =
+        1.0e-6;
+
+    bool passed =
+        std::isfinite(
+            relative_error
+        ) &&
+
+        std::isfinite(
+            maximum_error
+        ) &&
+
+        std::isfinite(
+            constraint_error
+        ) &&
+
+        std::isfinite(
+            target_gain_error
+        ) &&
+
+        relative_error <
+            TOLERANCE &&
+
+        maximum_error <
+            TOLERANCE &&
+
+        constraint_error <
+            TOLERANCE &&
+
+        target_gain_error <
+            TOLERANCE;
+
+    cout << endl;
+
+    if (passed)
+    {
+        cout
+            << "======================================"
+            << endl;
+
+        cout
+            << "COMBINED MVDR TOP TEST PASSED"
+            << endl;
+
+        cout
+            << "======================================"
+            << endl;
+
+        return 0;
+    }
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "COMBINED MVDR TOP TEST FAILED"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    return 1;
+}
+
+
+
+
+
+
+
+Project folder
+Plain text
+C:\mvdr_hls\mvdr_top\
+│
+├── mvdr_top.h
+├── mvdr_top.cpp
+├── tb_mvdr_top.cpp
+│
+├── Xtrain_real.csv
+├── Xtrain_imag.csv
+├── w_real.csv
+├── w_imag.csv
+├── a_s_real.csv
+└── a_s_imag.csv
+Do not add these isolated files to this self-contained project:
+Plain text
+qr.cpp
+backsub.cpp
+covariance.cpp
+steering_vec.cpp
+qh_multiply.cpp
+normalize_weights.cpp
+Otherwise, you would maintain duplicate implementations.
+Vitis HLS settings
+Top function
+Plain text
+mvdr_top
+Design files
+Plain text
+mvdr_top.cpp
+mvdr_top.h
+Testbench files
+Plain text
+tb_mvdr_top.cpp
+
+Xtrain_real.csv
+Xtrain_imag.csv
+
+w_real.csv
+w_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+Device
+Plain text
+xcvc1902-vsva2197-2MP-e-S
+Clock
+Plain text
+10 ns
+Top-level function arguments are converted into hardware interfaces by HLS; large array arguments such as Xtrain are treated as memory-interface data. AXI interface directives should be added only after this functional version passes. �
+AMD Documentation +1
+Run order
+Plain text
+1. Run C Simulation
+2. Confirm COMBINED MVDR TOP TEST PASSED
+3. Run C Synthesis
+4. Do not add pragmas or AXI directives yet
+This mvdr_top computes the complete normalized MVDR weight vector. It does not yet calculate the output signal �; that beamformer-application
