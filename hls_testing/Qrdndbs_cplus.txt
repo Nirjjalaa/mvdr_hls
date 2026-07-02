@@ -1,0 +1,1831 @@
+Below is the complete complex Givens QRD HLS code for your Vitis HLS 2024.2 installation using:
+
+#include <complex>
+typedef std::complex<double> cplx;
+
+It does not use:
+
+hls_complex.h
+hls_math.h
+std::abs(complex)
+std::conj(complex)
+std::norm(complex)
+
+inside the synthesizable design. Therefore, it avoids the Undefined function cabs error.
+
+This implements the same complex Givens rotation as your MATLAB code.
+
+
+---
+
+1. qr.h
+
+#ifndef QR_H
+#define QR_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<double> cplx;
+
+/*
+ * Complex Givens QR decomposition
+ *
+ * Input:
+ *      A = 64 x 64 complex matrix
+ *
+ * Outputs:
+ *      Q = 64 x 64 unitary matrix
+ *      R = 64 x 64 upper-triangular matrix
+ *
+ * Relationship:
+ *      A = Q * R
+ */
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+);
+
+#endif
+
+
+---
+
+2. qr.cpp
+
+#include "qr.h"
+#include <cmath>
+
+/*
+ * Squared magnitude:
+ *
+ * |z|^2 = real(z)^2 + imag(z)^2
+ *
+ * This replaces std::norm(z).
+ */
+static double complex_mag_squared(cplx z)
+{
+    double real_part = z.real();
+    double imag_part = z.imag();
+
+    return real_part * real_part +
+           imag_part * imag_part;
+}
+
+/*
+ * Complex magnitude:
+ *
+ * |z| = sqrt(real(z)^2 + imag(z)^2)
+ *
+ * This replaces std::abs(z), which caused Vitis HLS
+ * to call the unsupported cabs function.
+ */
+static double complex_magnitude(cplx z)
+{
+    double magnitude_squared =
+        complex_mag_squared(z);
+
+    return std::sqrt(magnitude_squared);
+}
+
+/*
+ * Complex conjugate:
+ *
+ * conj(a + jb) = a - jb
+ *
+ * This replaces std::conj(z).
+ */
+static cplx complex_conjugate(cplx z)
+{
+    return cplx(
+        z.real(),
+        -z.imag()
+    );
+}
+
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+)
+{
+    const double EPS = 1.0e-12;
+    const double EPS_SQUARED = 1.0e-24;
+
+    /*
+     * Initialize:
+     *
+     * R = A
+     * Q = identity matrix
+     */
+INITIALIZE_ROWS:
+    for (int row = 0; row < N; row++)
+    {
+    INITIALIZE_COLUMNS:
+        for (int column = 0; column < N; column++)
+        {
+            R[row][column] =
+                A[row][column];
+
+            if (row == column)
+            {
+                Q[row][column] =
+                    cplx(1.0, 0.0);
+            }
+            else
+            {
+                Q[row][column] =
+                    cplx(0.0, 0.0);
+            }
+        }
+    }
+
+    /*
+     * Complex Givens QR decomposition.
+     *
+     * This matches the MATLAB loop:
+     *
+     * for j = 1:n
+     *     for i = m:-1:(j+1)
+     */
+QR_COLUMNS:
+    for (int j = 0; j < N; j++)
+    {
+    QR_ROWS:
+        for (int i = N - 1; i > j; i--)
+        {
+            /*
+             * Check whether R(i,j) is already zero.
+             *
+             * MATLAB:
+             * if abs(R(i,j)) > 1e-12
+             */
+            double lower_magnitude_squared =
+                complex_mag_squared(R[i][j]);
+
+            if (lower_magnitude_squared >
+                EPS_SQUARED)
+            {
+                /*
+                 * Adjacent matrix elements:
+                 *
+                 * a = R(i-1,j)
+                 * b = R(i,j)
+                 */
+                cplx a = R[i - 1][j];
+                cplx b = R[i][j];
+
+                double magnitude_a =
+                    complex_magnitude(a);
+
+                double magnitude_b_squared =
+                    complex_mag_squared(b);
+
+                /*
+                 * r = sqrt(|a|^2 + |b|^2)
+                 */
+                double rotation_norm =
+                    std::sqrt(
+                        magnitude_a * magnitude_a +
+                        magnitude_b_squared
+                    );
+
+                if (rotation_norm > EPS)
+                {
+                    /*
+                     * c = |a| / r
+                     *
+                     * c is real.
+                     */
+                    double c =
+                        magnitude_a /
+                        rotation_norm;
+
+                    /*
+                     * alpha = a / |a|
+                     *
+                     * When |a| is approximately zero,
+                     * alpha is set to 1.
+                     */
+                    cplx alpha;
+
+                    if (magnitude_a < EPS)
+                    {
+                        alpha =
+                            cplx(1.0, 0.0);
+                    }
+                    else
+                    {
+                        alpha = cplx(
+                            a.real() / magnitude_a,
+                            a.imag() / magnitude_a
+                        );
+                    }
+
+                    /*
+                     * s = alpha * conj(b) / r
+                     *
+                     * s is generally complex.
+                     */
+                    cplx conjugate_b =
+                        complex_conjugate(b);
+
+                    cplx s =
+                        (alpha * conjugate_b) /
+                        rotation_norm;
+
+                    cplx conjugate_s =
+                        complex_conjugate(s);
+
+                    /*
+                     * Complex Givens rotation:
+                     *
+                     *     [ c          s ]
+                     * G = [              ]
+                     *     [ -conj(s)  c ]
+                     *
+                     * Update:
+                     *
+                     * R = G * R
+                     */
+                UPDATE_R:
+                    for (int k = j; k < N; k++)
+                    {
+                        cplx upper_old =
+                            R[i - 1][k];
+
+                        cplx lower_old =
+                            R[i][k];
+
+                        cplx upper_new =
+                            c * upper_old +
+                            s * lower_old;
+
+                        cplx lower_new =
+                            -conjugate_s * upper_old +
+                            c * lower_old;
+
+                        R[i - 1][k] =
+                            upper_new;
+
+                        R[i][k] =
+                            lower_new;
+                    }
+
+                    /*
+                     * Force the eliminated element to zero.
+                     *
+                     * This avoids retaining a tiny floating-point
+                     * residual below the diagonal.
+                     */
+                    R[i][j] =
+                        cplx(0.0, 0.0);
+
+                    /*
+                     * MATLAB:
+                     *
+                     * Q(:,[i-1 i]) =
+                     * Q(:,[i-1 i]) * G';
+                     *
+                     * For:
+                     *
+                     * G = [c, s; -conj(s), c]
+                     *
+                     * G' = [c, -s; conj(s), c]
+                     */
+                UPDATE_Q:
+                    for (int k = 0; k < N; k++)
+                    {
+                        cplx left_old =
+                            Q[k][i - 1];
+
+                        cplx right_old =
+                            Q[k][i];
+
+                        cplx left_new =
+                            c * left_old +
+                            conjugate_s * right_old;
+
+                        cplx right_new =
+                            -s * left_old +
+                            c * right_old;
+
+                        Q[k][i - 1] =
+                            left_new;
+
+                        Q[k][i] =
+                            right_new;
+                    }
+                }
+            }
+        }
+    }
+}
+
+This is a complex Givens rotation because:
+
+a and b are complex.
+
+alpha is complex.
+
+s is complex.
+
+conj(s) is used.
+
+Both real and imaginary parts of Q and R are updated.
+
+
+The only ordinary mathematical library operation is std::sqrt(double). AMD documents synthesis support for float, double, and standard real-valued math functions such as sqrt() in Vitis HLS. 
+
+
+---
+
+3. tb_qr.cpp
+
+Use this testbench instead of the simple no-CSV testbench.
+
+It loads:
+
+R_real.csv
+R_imag.csv
+Q_real.csv
+Q_imag.csv
+Ru_real.csv
+Ru_imag.csv
+
+It verifies:
+
+1. HLS Q against MATLAB Q
+
+
+2. HLS Ru against MATLAB Ru
+
+
+3. 
+
+
+4. 
+
+
+5. Lower-triangular values of Ru are approximately zero
+
+
+6. No NaN or infinity occurs
+
+
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "qr.h"
+
+using namespace std;
+
+/*
+ * Read all numerical values from a CSV file.
+ *
+ * Supports:
+ *   - comma-separated matrix rows
+ *   - newline-separated vector values
+ */
+vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr << "ERROR: Cannot open file: "
+             << filename << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Convert commas to spaces.
+         *
+         * stringstream can then read every value
+         * using the >> operator.
+         */
+        for (size_t i = 0;
+             i < line.size();
+             i++)
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream stream(line);
+        double value;
+
+        while (stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * Load one 64 x 64 complex matrix.
+ */
+void load_complex_matrix(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx matrix[N][N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    const int expected_values =
+        N * N;
+
+    if ((int)real_values.size() !=
+        expected_values)
+    {
+        cerr << "ERROR: "
+             << real_filename
+             << " contains "
+             << real_values.size()
+             << " values." << endl;
+
+        cerr << "Expected "
+             << expected_values
+             << " values for a "
+             << N << " x " << N
+             << " matrix." << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() !=
+        expected_values)
+    {
+        cerr << "ERROR: "
+             << imag_filename
+             << " contains "
+             << imag_values.size()
+             << " values." << endl;
+
+        cerr << "Expected "
+             << expected_values
+             << " values for a "
+             << N << " x " << N
+             << " matrix." << endl;
+
+        exit(1);
+    }
+
+    int index = 0;
+
+    for (int row = 0; row < N; row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            matrix[row][column] =
+                cplx(
+                    real_values[index],
+                    imag_values[index]
+                );
+
+            index++;
+        }
+    }
+
+    cout << "Loaded "
+         << real_filename
+         << " as "
+         << N << " x " << N
+         << endl;
+}
+
+/*
+ * Check whether every complex matrix value
+ * is finite.
+ */
+bool matrix_is_finite(
+    cplx matrix[N][N]
+)
+{
+    for (int row = 0; row < N; row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            if (!std::isfinite(
+                    matrix[row][column].real()
+                ) ||
+                !std::isfinite(
+                    matrix[row][column].imag()
+                ))
+            {
+                cerr
+                    << "ERROR: Non-finite value at ["
+                    << row << "]["
+                    << column << "]"
+                    << endl;
+
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/*
+ * Relative Frobenius error:
+ *
+ * sqrt(
+ *   sum |result-reference|^2
+ *   --------------------------------
+ *   sum |reference|^2
+ * )
+ */
+double relative_matrix_error(
+    cplx reference[N][N],
+    cplx result[N][N]
+)
+{
+    double error_power = 0.0;
+    double reference_power = 0.0;
+
+    for (int row = 0; row < N; row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            double difference_real =
+                result[row][column].real() -
+                reference[row][column].real();
+
+            double difference_imag =
+                result[row][column].imag() -
+                reference[row][column].imag();
+
+            double reference_real =
+                reference[row][column].real();
+
+            double reference_imag =
+                reference[row][column].imag();
+
+            error_power +=
+                difference_real *
+                difference_real +
+                difference_imag *
+                difference_imag;
+
+            reference_power +=
+                reference_real *
+                reference_real +
+                reference_imag *
+                reference_imag;
+        }
+    }
+
+    if (reference_power < 1.0e-30)
+    {
+        cerr
+            << "ERROR: Reference matrix norm is zero."
+            << endl;
+
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        error_power /
+        reference_power
+    );
+}
+
+/*
+ * Verify Q^H Q approximately equals I.
+ */
+double orthogonality_error(
+    cplx Q[N][N]
+)
+{
+    double error_power = 0.0;
+
+    for (int row = 0; row < N; row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            cplx sum =
+                cplx(0.0, 0.0);
+
+            for (int k = 0; k < N; k++)
+            {
+                /*
+                 * Testbench only:
+                 * std::conj is safe because the
+                 * testbench is not synthesized.
+                 */
+                sum +=
+                    std::conj(Q[k][row]) *
+                    Q[k][column];
+            }
+
+            cplx expected;
+
+            if (row == column)
+            {
+                expected =
+                    cplx(1.0, 0.0);
+            }
+            else
+            {
+                expected =
+                    cplx(0.0, 0.0);
+            }
+
+            cplx difference =
+                sum - expected;
+
+            error_power +=
+                std::norm(difference);
+        }
+    }
+
+    return std::sqrt(error_power);
+}
+
+/*
+ * Verify Q * Ru approximately equals input R.
+ */
+double reconstruction_error(
+    cplx input_R[N][N],
+    cplx Q[N][N],
+    cplx Ru[N][N]
+)
+{
+    double error_power = 0.0;
+    double input_power = 0.0;
+
+    for (int row = 0; row < N; row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            cplx reconstructed =
+                cplx(0.0, 0.0);
+
+            for (int k = 0; k < N; k++)
+            {
+                reconstructed +=
+                    Q[row][k] *
+                    Ru[k][column];
+            }
+
+            cplx difference =
+                reconstructed -
+                input_R[row][column];
+
+            error_power +=
+                std::norm(difference);
+
+            input_power +=
+                std::norm(
+                    input_R[row][column]
+                );
+        }
+    }
+
+    if (input_power < 1.0e-30)
+    {
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        error_power /
+        input_power
+    );
+}
+
+/*
+ * Norm of all elements below the main diagonal.
+ */
+double lower_triangular_error(
+    cplx R[N][N]
+)
+{
+    double error_power = 0.0;
+
+    for (int row = 1; row < N; row++)
+    {
+        for (int column = 0;
+             column < row;
+             column++)
+        {
+            error_power +=
+                std::norm(
+                    R[row][column]
+                );
+        }
+    }
+
+    return std::sqrt(error_power);
+}
+
+int main()
+{
+    /*
+     * Static arrays prevent large matrices from
+     * overflowing the Windows stack.
+     */
+    static cplx R_input[N][N];
+
+    static cplx Q_matlab[N][N];
+    static cplx Ru_matlab[N][N];
+
+    static cplx Q_hls[N][N];
+    static cplx Ru_hls[N][N];
+
+    cout << endl;
+    cout << "================================="
+         << endl;
+
+    cout << "COMPLEX GIVENS QRD HLS TEST"
+         << endl;
+
+    cout << "================================="
+         << endl;
+
+    /*
+     * Input covariance matrix.
+     */
+    load_complex_matrix(
+        "R_real.csv",
+        "R_imag.csv",
+        R_input
+    );
+
+    /*
+     * MATLAB golden Q.
+     */
+    load_complex_matrix(
+        "Q_real.csv",
+        "Q_imag.csv",
+        Q_matlab
+    );
+
+    /*
+     * MATLAB golden upper-triangular Ru.
+     */
+    load_complex_matrix(
+        "Ru_real.csv",
+        "Ru_imag.csv",
+        Ru_matlab
+    );
+
+    /*
+     * Execute the HLS QRD function.
+     */
+    givens_qr(
+        R_input,
+        Q_hls,
+        Ru_hls
+    );
+
+    /*
+     * Check for NaN and infinity before
+     * calculating errors.
+     */
+    if (!matrix_is_finite(Q_hls))
+    {
+        cerr
+            << "FAIL: Q contains NaN or infinity."
+            << endl;
+
+        return 1;
+    }
+
+    if (!matrix_is_finite(Ru_hls))
+    {
+        cerr
+            << "FAIL: Ru contains NaN or infinity."
+            << endl;
+
+        return 1;
+    }
+
+    /*
+     * Compare against MATLAB.
+     */
+    double q_relative_error =
+        relative_matrix_error(
+            Q_matlab,
+            Q_hls
+        );
+
+    double ru_relative_error =
+        relative_matrix_error(
+            Ru_matlab,
+            Ru_hls
+        );
+
+    /*
+     * Independent mathematical checks.
+     */
+    double q_orthogonality_error =
+        orthogonality_error(Q_hls);
+
+    double qr_reconstruction_error =
+        reconstruction_error(
+            R_input,
+            Q_hls,
+            Ru_hls
+        );
+
+    double triangular_error =
+        lower_triangular_error(
+            Ru_hls
+        );
+
+    cout << endl;
+    cout << "===== QRD RESULTS ====="
+         << endl;
+
+    cout << "Q relative error       = "
+         << q_relative_error
+         << endl;
+
+    cout << "Ru relative error      = "
+         << ru_relative_error
+         << endl;
+
+    cout << "Q orthogonality error  = "
+         << q_orthogonality_error
+         << endl;
+
+    cout << "QR reconstruction error= "
+         << qr_reconstruction_error
+         << endl;
+
+    cout << "Lower triangular error = "
+         << triangular_error
+         << endl;
+
+    cout << endl;
+    cout << "First few output values:"
+         << endl;
+
+    cout << "Q_hls[0][0]  = "
+         << Q_hls[0][0]
+         << endl;
+
+    cout << "Q_gold[0][0] = "
+         << Q_matlab[0][0]
+         << endl;
+
+    cout << "Ru_hls[0][0]  = "
+         << Ru_hls[0][0]
+         << endl;
+
+    cout << "Ru_gold[0][0] = "
+         << Ru_matlab[0][0]
+         << endl;
+
+    cout << "Ru_hls[1][0]  = "
+         << Ru_hls[1][0]
+         << endl;
+
+    /*
+     * A relaxed tolerance of 1e-6 is suitable
+     * for initial functional verification.
+     */
+    const double TOLERANCE = 1.0e-6;
+
+    bool passed =
+        std::isfinite(q_relative_error) &&
+        std::isfinite(ru_relative_error) &&
+        std::isfinite(
+            q_orthogonality_error
+        ) &&
+        std::isfinite(
+            qr_reconstruction_error
+        ) &&
+        std::isfinite(
+            triangular_error
+        ) &&
+        q_relative_error <
+            TOLERANCE &&
+        ru_relative_error <
+            TOLERANCE &&
+        q_orthogonality_error <
+            TOLERANCE &&
+        qr_reconstruction_error <
+            TOLERANCE &&
+        triangular_error <
+            TOLERANCE;
+
+    cout << endl;
+
+    if (passed)
+    {
+        cout << "================================="
+             << endl;
+
+        cout << "COMPLEX QRD TEST PASSED"
+             << endl;
+
+        cout << "================================="
+             << endl;
+
+        return 0;
+    }
+    else
+    {
+        cout << "================================="
+             << endl;
+
+        cout << "COMPLEX QRD TEST 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+No—the unnormalized back-substitution weights will not have target gain 1. That is expected.
+
+The sequence is:
+
+Back substitution
+        ↓
+w_unnorm = Ru⁻¹y
+        ↓
+Normalization
+        ↓
+w_manual = w_unnorm / (a_sᴴw_unnorm)
+        ↓
+Target gain ≈ 1
+
+In MATLAB:
+
+w_unnorm = back_substitution(Ru, y);
+
+normalization_factor = a_s' * w_unnorm;
+
+w_manual = w_unnorm / normalization_factor;
+
+g_target = abs(w_manual' * a_s);
+
+Therefore:
+
+Back-substitution HLS test:
+w_hls compared with w_unnorm
+
+Normalization HLS test:
+normalized HLS weight compared with w_manual
+
+Your final MVDR weight remains normalized, so the target gain will still be approximately 1.
+
+The nan in your old test was most likely caused by the comma-separated Ru matrix not being loaded properly. The corrected testbench below counts all 4,096 matrix values and checks every diagonal element before running back substitution.
+
+Since <complex> works in your installation, continue using std::complex<double>. AMD documentation identifies both std::complex and hls::x_complex as complex representations used with Vitis HLS-related flows. 
+
+1. backsub.h
+
+#ifndef BACKSUB_H
+#define BACKSUB_H
+
+#include <complex>
+
+#define N 64
+
+typedef std::complex<double> cplx;
+
+/*
+ * Solves the upper-triangular system:
+ *
+ * R * x = b
+ *
+ * R: 64 x 64 upper-triangular complex matrix
+ * b: 64 x 1 complex vector
+ * x: 64 x 1 complex solution vector
+ */
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+);
+
+#endif
+
+2. backsub.cpp
+
+This version avoids complex division from the standard library. The complex division is written manually.
+
+Do not add pragmas yet.
+
+#include "backsub.h"
+
+/*
+ * Complex multiplication:
+ *
+ * (ar + j*ai)(br + j*bi)
+ *
+ * real = ar*br - ai*bi
+ * imag = ar*bi + ai*br
+ */
+static cplx complex_multiply(
+    cplx a,
+    cplx b
+)
+{
+    double ar = a.real();
+    double ai = a.imag();
+
+    double br = b.real();
+    double bi = b.imag();
+
+    double result_real =
+        ar * br - ai * bi;
+
+    double result_imag =
+        ar * bi + ai * br;
+
+    return cplx(
+        result_real,
+        result_imag
+    );
+}
+
+/*
+ * Complex subtraction:
+ *
+ * result = a - b
+ */
+static cplx complex_subtract(
+    cplx a,
+    cplx b
+)
+{
+    return cplx(
+        a.real() - b.real(),
+        a.imag() - b.imag()
+    );
+}
+
+/*
+ * Complex division:
+ *
+ *      nr + j*ni
+ * ------------------
+ *      dr + j*di
+ *
+ * denominator = dr^2 + di^2
+ *
+ * real = (nr*dr + ni*di) / denominator
+ * imag = (ni*dr - nr*di) / denominator
+ */
+static cplx complex_divide(
+    cplx numerator,
+    cplx denominator
+)
+{
+    double nr = numerator.real();
+    double ni = numerator.imag();
+
+    double dr = denominator.real();
+    double di = denominator.imag();
+
+    double denominator_power =
+        dr * dr + di * di;
+
+    /*
+     * Valid QRD output should not have a zero
+     * diagonal. This guard prevents NaN if an
+     * invalid matrix is supplied.
+     */
+    if (denominator_power < 1.0e-30)
+    {
+        return cplx(0.0, 0.0);
+    }
+
+    double result_real =
+        (nr * dr + ni * di) /
+        denominator_power;
+
+    double result_imag =
+        (ni * dr - nr * di) /
+        denominator_power;
+
+    return cplx(
+        result_real,
+        result_imag
+    );
+}
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+BACKSUB_OUTER:
+    for (int i = N - 1; i >= 0; i--)
+    {
+        cplx sum = b[i];
+
+    BACKSUB_INNER:
+        for (int j = i + 1; j < N; j++)
+        {
+            cplx product =
+                complex_multiply(
+                    R[i][j],
+                    x[j]
+                );
+
+            sum =
+                complex_subtract(
+                    sum,
+                    product
+                );
+        }
+
+        x[i] =
+            complex_divide(
+                sum,
+                R[i][i]
+            );
+    }
+}
+
+3. tb_backsub.cpp
+
+This testbench:
+
+Correctly reads comma-separated matrices.
+
+Correctly reads newline-separated vectors.
+
+Confirms that Ru contains exactly 4,096 values.
+
+Confirms that vectors contain exactly 64 values.
+
+Checks all diagonal elements before division.
+
+Detects nan and infinity.
+
+Prevents false passing when the golden vector has zero norm.
+
+Compares against w_unnorm, not normalized w.
+
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "backsub.h"
+
+using namespace std;
+
+/*
+ * Reads every numerical value from a CSV file.
+ *
+ * It handles:
+ *  - comma-separated matrix rows
+ *  - one-value-per-line vectors
+ */
+vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr << "ERROR: Cannot open file: "
+             << filename << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Replace commas with spaces.
+         */
+        for (size_t i = 0;
+             i < line.size();
+             i++)
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream stream(line);
+        double value;
+
+        while (stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * Load a 64 x 64 complex matrix.
+ */
+void load_complex_matrix(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx matrix[N][N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    const int expected_values =
+        N * N;
+
+    cout << real_filename
+         << " values found = "
+         << real_values.size()
+         << endl;
+
+    cout << imag_filename
+         << " values found = "
+         << imag_values.size()
+         << endl;
+
+    if ((int)real_values.size() !=
+        expected_values)
+    {
+        cerr << "ERROR: "
+             << real_filename
+             << " must contain "
+             << expected_values
+             << " values for a "
+             << N << " x " << N
+             << " matrix."
+             << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() !=
+        expected_values)
+    {
+        cerr << "ERROR: "
+             << imag_filename
+             << " must contain "
+             << expected_values
+             << " values for a "
+             << N << " x " << N
+             << " matrix."
+             << endl;
+
+        exit(1);
+    }
+
+    int index = 0;
+
+    for (int row = 0; row < N; row++)
+    {
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+            matrix[row][column] =
+                cplx(
+                    real_values[index],
+                    imag_values[index]
+                );
+
+            index++;
+        }
+    }
+
+    cout << "Loaded matrix successfully: "
+         << N << " x " << N
+         << endl;
+}
+
+/*
+ * Load a 64 x 1 complex vector.
+ */
+void load_complex_vector(
+    const char* real_filename,
+    const char* imag_filename,
+    cplx vector_output[N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    cout << real_filename
+         << " values found = "
+         << real_values.size()
+         << endl;
+
+    cout << imag_filename
+         << " values found = "
+         << imag_values.size()
+         << endl;
+
+    if ((int)real_values.size() != N)
+    {
+        cerr << "ERROR: "
+             << real_filename
+             << " must contain exactly "
+             << N << " values."
+             << endl;
+
+        exit(1);
+    }
+
+    if ((int)imag_values.size() != N)
+    {
+        cerr << "ERROR: "
+             << imag_filename
+             << " must contain exactly "
+             << N << " values."
+             << endl;
+
+        exit(1);
+    }
+
+    for (int i = 0; i < N; i++)
+    {
+        vector_output[i] =
+            cplx(
+                real_values[i],
+                imag_values[i]
+            );
+    }
+
+    cout << "Loaded vector successfully: "
+         << N << " x 1"
+         << endl;
+}
+
+/*
+ * Checks whether a complex value is finite.
+ */
+bool complex_is_finite(cplx value)
+{
+    return
+        std::isfinite(value.real()) &&
+        std::isfinite(value.imag());
+}
+
+/*
+ * Check every diagonal value of Ru.
+ */
+bool check_matrix_diagonal(
+    cplx R[N][N]
+)
+{
+    double minimum_diagonal_magnitude =
+        numeric_limits<double>::infinity();
+
+    int minimum_index = -1;
+
+    for (int i = 0; i < N; i++)
+    {
+        if (!complex_is_finite(R[i][i]))
+        {
+            cerr << "ERROR: Ru diagonal contains "
+                 << "NaN or infinity at index "
+                 << i << endl;
+
+            return false;
+        }
+
+        double real_part =
+            R[i][i].real();
+
+        double imag_part =
+            R[i][i].imag();
+
+        double magnitude =
+            std::sqrt(
+                real_part * real_part +
+                imag_part * imag_part
+            );
+
+        if (magnitude <
+            minimum_diagonal_magnitude)
+        {
+            minimum_diagonal_magnitude =
+                magnitude;
+
+            minimum_index = i;
+        }
+
+        if (magnitude < 1.0e-12)
+        {
+            cerr << "ERROR: Ru diagonal is zero "
+                 << "or too small at index "
+                 << i << endl;
+
+            cerr << "Ru[" << i << "]["
+                 << i << "] = "
+                 << R[i][i]
+                 << endl;
+
+            return false;
+        }
+    }
+
+    cout << "Smallest Ru diagonal magnitude = "
+         << minimum_diagonal_magnitude
+         << " at index "
+         << minimum_index
+         << endl;
+
+    return true;
+}
+
+/*
+ * Relative vector error:
+ *
+ * sqrt(
+ *    sum |result-reference|^2
+ *    ----------------------------
+ *    sum |reference|^2
+ * )
+ */
+double relative_vector_error(
+    cplx reference[N],
+    cplx result[N]
+)
+{
+    double error_power = 0.0;
+    double reference_power = 0.0;
+
+    for (int i = 0; i < N; i++)
+    {
+        if (!complex_is_finite(result[i]))
+        {
+            cerr << "ERROR: HLS result contains "
+                 << "NaN or infinity at index "
+                 << i << endl;
+
+            return
+                numeric_limits<double>::infinity();
+        }
+
+        if (!complex_is_finite(reference[i]))
+        {
+            cerr << "ERROR: Golden result contains "
+                 << "NaN or infinity at index "
+                 << i << endl;
+
+            return
+                numeric_limits<double>::infinity();
+        }
+
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double reference_real =
+            reference[i].real();
+
+        double reference_imag =
+            reference[i].imag();
+
+        error_power +=
+            difference_real * difference_real +
+            difference_imag * difference_imag;
+
+        reference_power +=
+            reference_real * reference_real +
+            reference_imag * reference_imag;
+    }
+
+    if (reference_power < 1.0e-30)
+    {
+        cerr << "ERROR: Golden-reference vector "
+             << "has zero norm."
+             << endl;
+
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        error_power /
+        reference_power
+    );
+}
+
+int main()
+{
+    /*
+     * Static prevents large arrays from
+     * overflowing the Windows stack.
+     */
+    static cplx Ru[N][N];
+
+    static cplx y[N];
+
+    static cplx w_unnorm_gold[N];
+    static cplx w_unnorm_hls[N];
+
+    cout << endl;
+    cout << "================================="
+         << endl;
+
+    cout << "BACK-SUBSTITUTION HLS TEST"
+         << endl;
+
+    cout << "================================="
+         << endl;
+
+    /*
+     * Load MATLAB Ru.
+     */
+    load_complex_matrix(
+        "Ru_real.csv",
+        "Ru_imag.csv",
+        Ru
+    );
+
+    /*
+     * Load MATLAB y = Q^H a_s.
+     */
+    load_complex_vector(
+        "y_real.csv",
+        "y_imag.csv",
+        y
+    );
+
+    /*
+     * Load MATLAB unnormalized weights.
+     */
+    load_complex_vector(
+        "w_unnorm_real.csv",
+        "w_unnorm_imag.csv",
+        w_unnorm_gold
+    );
+
+    /*
+     * Check the matrix before attempting division.
+     */
+    if (!check_matrix_diagonal(Ru))
+    {
+        cout << endl;
+        cout << "TEST STOPPED BEFORE "
+             << "BACK SUBSTITUTION."
+             << endl;
+
+        return 1;
+    }
+
+    /*
+     * Execute the HLS function.
+     */
+    back_substitution(
+        Ru,
+        y,
+        w_unnorm_hls
+    );
+
+    /*
+     * Calculate numerical error.
+     */
+    double relative_error =
+        relative_vector_error(
+            w_unnorm_gold,
+            w_unnorm_hls
+        );
+
+    cout << endl;
+    cout << "===== RESULTS ====="
+         << endl;
+
+    cout << "Relative error = "
+         << relative_error
+         << endl;
+
+    cout << endl;
+    cout << "First five unnormalized weights:"
+         << endl;
+
+    for (int i = 0; i < 5; i++)
+    {
+        cout << endl;
+        cout << "Index " << i << endl;
+
+        cout << "MATLAB = "
+             << w_unnorm_gold[i]
+             << endl;
+
+        cout << "HLS    = "
+             << w_unnorm_hls[i]
+             << endl;
+    }
+
+    const double TOLERANCE =
+        1.0e-6;
+
+    bool passed =
+        std::isfinite(relative_error) &&
+        relative_error < TOLERANCE;
+
+    cout << endl;
+
+    if (passed)
+    {
+        cout << "================================="
+             << endl;
+
+        cout << "BACK-SUBSTITUTION TEST PASSED"
+             << endl;
+
+        cout << "================================="
+             << endl;
+
+        return 0;
+    }
+    else
+    {
+        cout << "================================="
+             << endl;
+
+        cout << "BACK-SUBSTITUTION TEST FAILED"
+             << endl;
+
+        cout << "================================="
+             << endl;
+
+        return 1;
+    }
+}
+
+MATLAB change required
+
+Replace:
+
+w_manual = back_substitution(Ru, y);
+w_manual = w_manual / (a_s' * w_manual);
+
+with:
+
+% Raw output of the back-substitution stage
+w_unnorm = back_substitution(Ru, y);
+
+% MVDR normalization
+normalization_factor = a_s' * w_unnorm;
+w_manual = w_unnorm / normalization_factor;
+
+In your export section add:
+
+export_vector('w_unnorm', w_unnorm);
+export_vector('w', w_manual);
+
+In your save command add w_unnorm:
+
+save('golden_reference.mat', ...
+    'a_s','a_i1','a_i2','Xtrain','Xdata', ...
+    'R','Ru','Q','y','w_unnorm','w_manual', ...
+    'normalization_factor');
+
+This creates:
+
+w_unnorm_real.csv
+w_unnorm_imag.csv
+
+Back-substitution HLS folder
+
+C:\mvdr_hls\backsub\
+│
+├── backsub.h
+├── backsub.cpp
+├── tb_backsub.cpp
+│
+├── Ru_real.csv
+├── Ru_imag.csv
+├── y_real.csv
+├── y_imag.csv
+├── w_unnorm_real.csv
+└── w_unnorm_imag.csv
+
+Use:
+
+Top function: back_substitution
+
+Design files:
+
+backsub.cpp
+backsub.h
+
+Testbench files:
+
+tb_backsub.cpp
+Ru_real.csv
+Ru_imag.csv
+y_real.csv
+y_imag.csv
+w_unnorm_real.csv
+w_unnorm_imag.csv
+
+Will this solve the nan?
+
+It should solve it when the original cause was the broken comma-delimited matrix loader—which is strongly indicated by your old code.
+
+With this testbench, you should see:
+
+Ru_real.csv values found = 4096
+Ru_imag.csv values found = 4096
+y_real.csv values found = 64
+y_imag.csv values found = 64
+w_unnorm_real.csv values found = 64
+w_unnorm_imag.csv values found = 64
+
+Then:
+
+Smallest Ru diagonal magnitude = ...
+Relative error = ...
+
+It will not silently print nan. If a problem remains, it will identify whether:
+
+The file cannot be opened.
+
+Ru does not contain 4,096 values.
+
+A vector does not contain 64 values.
+
+A diagonal value is zero.
+
+A value is already nan or infinite.
+
+The golden reference has zero norm.
+
+The calculated HLS output becomes non-finite.
+
+
+After back substitution passes, the next isolated block is normalization. That block converts w_unnorm to the final w_manual, giving target gain approximately 1.
