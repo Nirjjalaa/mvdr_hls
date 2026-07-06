@@ -1,0 +1,1670 @@
+Yes. Since back substitution, complex QRD, covariance, steering vector, and  have already passed C simulation and synthesis, you can prepare their final conservative optimized versions.
+
+Do not replace all five at once. First finish:
+
+Normalization → C simulation + synthesis
+MVDR top      → C simulation + synthesis
+
+Then replace one verified source file at a time and rerun C simulation and synthesis.
+
+Your a_i1_real.csv probably contains an error response instead of numerical data. Delete it and regenerate it later using:
+
+writematrix(real(a_i1), 'a_i1_real.csv');
+writematrix(imag(a_i1), 'a_i1_imag.csv');
+
+It does not block the MVDR weight engine because the final hardware needs only the target steering vector a_s. The interference vectors are used for checking rejection gains.
+
+The versions below use #pragma HLS PIPELINE without forcing II=1. Vitis then attempts the lowest feasible II based on timing and dependencies. Accumulation and recursive loops may still report an II or loop-dependency warning, but the tool can synthesize them with a larger achieved II. 
+
+
+---
+
+1. Final steering-vector source
+
+Keep your existing steering_vec.h and testbench. Replace only steering_vec.cpp.
+
+steering_vec.cpp
+
+#include "steering_vec.h"
+#include <cmath>
+
+void steering_vec(
+    double az_deg,
+    double el_deg,
+    double d,
+    cplx a[N]
+)
+{
+    const double DEG_TO_RAD =
+        PI / 180.0;
+
+    const double NORMALIZATION =
+        0.125;  // 1/sqrt(64)
+
+    double az =
+        az_deg * DEG_TO_RAD;
+
+    double el =
+        el_deg * DEG_TO_RAD;
+
+    double u =
+        std::sin(az) *
+        std::cos(el);
+
+    double v =
+        std::sin(el);
+
+STEERING_LOOP:
+    for (int index = 0; index < N; index++)
+    {
+#pragma HLS PIPELINE
+
+        int x = index % NX;
+        int y = index / NX;
+
+        double phase =
+            2.0 * PI * d *
+            (
+                (double)x * u +
+                (double)y * v
+            );
+
+        double real_value =
+            NORMALIZATION *
+            std::cos(phase);
+
+        double imag_value =
+            NORMALIZATION *
+            std::sin(phase);
+
+        a[index] =
+            cplx(real_value, imag_value);
+    }
+}
+
+This produces the same complex steering vector:
+
+real = 0.125 × cos(phase)
+imag = 0.125 × sin(phase)
+
+
+---
+
+2. Final covariance source
+
+This version computes only one triangle and creates the other triangle using Hermitian symmetry:
+
+R_{j,i}=R_{i,j}^{*}
+
+That almost halves the number of covariance calculations.
+
+Keep covariance.h and tb_covariance.cpp. Replace only covariance.cpp.
+
+covariance.cpp
+
+#include "covariance.h"
+
+void covariance_matrix(
+    const cplx Xtrain[N][K],
+    cplx R[N][N]
+)
+{
+    const double INV_K =
+        1.0 / (double)K;
+
+    /*
+     * Compute the upper triangle, including
+     * the main diagonal.
+     *
+     * R(i,j) =
+     * sum X(i,k) * conj(X(j,k)) / K
+     */
+COVARIANCE_ROW:
+    for (int i = 0; i < N; i++)
+    {
+    COVARIANCE_COLUMN:
+        for (int j = i; j < N; j++)
+        {
+            double sum_real = 0.0;
+            double sum_imag = 0.0;
+
+        SNAPSHOT_LOOP:
+            for (int k = 0; k < K; k++)
+            {
+#pragma HLS PIPELINE
+
+                double xi_real =
+                    Xtrain[i][k].real();
+
+                double xi_imag =
+                    Xtrain[i][k].imag();
+
+                double xj_real =
+                    Xtrain[j][k].real();
+
+                double xj_imag =
+                    Xtrain[j][k].imag();
+
+                /*
+                 * X(i,k) * conj(X(j,k))
+                 */
+                sum_real +=
+                    xi_real * xj_real +
+                    xi_imag * xj_imag;
+
+                sum_imag +=
+                    xi_imag * xj_real -
+                    xi_real * xj_imag;
+            }
+
+            double covariance_real =
+                sum_real * INV_K;
+
+            double covariance_imag =
+                sum_imag * INV_K;
+
+            R[i][j] =
+                cplx(
+                    covariance_real,
+                    covariance_imag
+                );
+
+            /*
+             * Hermitian mirror:
+             *
+             * R(j,i) = conj(R(i,j))
+             */
+            if (i != j)
+            {
+                R[j][i] =
+                    cplx(
+                        covariance_real,
+                        -covariance_imag
+                    );
+            }
+        }
+    }
+
+    /*
+     * Diagonal loading:
+     *
+     * delta = 0.01 * trace(R) / N
+     */
+    double trace_real = 0.0;
+
+TRACE_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+#pragma HLS PIPELINE
+
+        trace_real +=
+            R[i][i].real();
+    }
+
+    double delta =
+        0.01 *
+        trace_real /
+        (double)N;
+
+DIAGONAL_LOADING_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+#pragma HLS PIPELINE
+
+        R[i][i] =
+            cplx(
+                R[i][i].real() + delta,
+                0.0
+            );
+    }
+}
+
+The snapshot and trace accumulation loops may still report a dependency-based II warning. That is expected because each accumulated sum depends on its preceding value.
+
+
+---
+
+3. Final complex QRD source
+
+Keep qr.h and tb_qr.cpp. Replace only qr.cpp.
+
+qr.cpp
+
+#include "qr.h"
+#include <cmath>
+
+static double complex_mag_squared(
+    cplx value
+)
+{
+#pragma HLS INLINE
+
+    double real_part =
+        value.real();
+
+    double imag_part =
+        value.imag();
+
+    return
+        real_part * real_part +
+        imag_part * imag_part;
+}
+
+static double complex_magnitude(
+    cplx value
+)
+{
+#pragma HLS INLINE
+
+    return std::sqrt(
+        complex_mag_squared(value)
+    );
+}
+
+static cplx complex_conjugate(
+    cplx value
+)
+{
+#pragma HLS INLINE
+
+    return cplx(
+        value.real(),
+        -value.imag()
+    );
+}
+
+static cplx complex_scale(
+    cplx value,
+    double scale
+)
+{
+#pragma HLS INLINE
+
+    return cplx(
+        value.real() * scale,
+        value.imag() * scale
+    );
+}
+
+static cplx complex_add(
+    cplx first,
+    cplx second
+)
+{
+#pragma HLS INLINE
+
+    return cplx(
+        first.real() + second.real(),
+        first.imag() + second.imag()
+    );
+}
+
+static cplx complex_subtract(
+    cplx first,
+    cplx second
+)
+{
+#pragma HLS INLINE
+
+    return cplx(
+        first.real() - second.real(),
+        first.imag() - second.imag()
+    );
+}
+
+static cplx complex_multiply(
+    cplx first,
+    cplx second
+)
+{
+#pragma HLS INLINE
+
+    double ar = first.real();
+    double ai = first.imag();
+
+    double br = second.real();
+    double bi = second.imag();
+
+    return cplx(
+        ar * br - ai * bi,
+        ar * bi + ai * br
+    );
+}
+
+static cplx complex_divide_real(
+    cplx numerator,
+    double denominator
+)
+{
+#pragma HLS INLINE
+
+    if (
+        denominator > -1.0e-30 &&
+        denominator < 1.0e-30
+    )
+    {
+        return cplx(0.0, 0.0);
+    }
+
+    return cplx(
+        numerator.real() / denominator,
+        numerator.imag() / denominator
+    );
+}
+
+void givens_qr(
+    cplx A[N][N],
+    cplx Q[N][N],
+    cplx R[N][N]
+)
+{
+    const double EPS =
+        1.0e-12;
+
+    const double EPS_SQUARED =
+        1.0e-24;
+
+    /*
+     * R = A
+     * Q = identity
+     */
+INITIALIZE_ROWS:
+    for (int row = 0; row < N; row++)
+    {
+    INITIALIZE_COLUMNS:
+        for (int column = 0;
+             column < N;
+             column++)
+        {
+#pragma HLS PIPELINE
+
+            R[row][column] =
+                A[row][column];
+
+            if (row == column)
+            {
+                Q[row][column] =
+                    cplx(1.0, 0.0);
+            }
+            else
+            {
+                Q[row][column] =
+                    cplx(0.0, 0.0);
+            }
+        }
+    }
+
+    /*
+     * Complex Givens rotations.
+     */
+QR_COLUMNS:
+    for (int j = 0; j < N; j++)
+    {
+    QR_ROWS:
+        for (int i = N - 1;
+             i > j;
+             i--)
+        {
+            double lower_power =
+                complex_mag_squared(
+                    R[i][j]
+                );
+
+            if (lower_power >
+                EPS_SQUARED)
+            {
+                cplx a =
+                    R[i - 1][j];
+
+                cplx b =
+                    R[i][j];
+
+                double magnitude_a =
+                    complex_magnitude(a);
+
+                double rotation_norm =
+                    std::sqrt(
+                        magnitude_a *
+                        magnitude_a +
+                        complex_mag_squared(b)
+                    );
+
+                if (rotation_norm > EPS)
+                {
+                    double c =
+                        magnitude_a /
+                        rotation_norm;
+
+                    cplx alpha;
+
+                    if (magnitude_a < EPS)
+                    {
+                        alpha =
+                            cplx(1.0, 0.0);
+                    }
+                    else
+                    {
+                        alpha =
+                            complex_divide_real(
+                                a,
+                                magnitude_a
+                            );
+                    }
+
+                    cplx s =
+                        complex_divide_real(
+                            complex_multiply(
+                                alpha,
+                                complex_conjugate(b)
+                            ),
+                            rotation_norm
+                        );
+
+                    cplx conjugate_s =
+                        complex_conjugate(s);
+
+                UPDATE_R:
+                    for (int k = j;
+                         k < N;
+                         k++)
+                    {
+#pragma HLS PIPELINE
+
+                        cplx upper_old =
+                            R[i - 1][k];
+
+                        cplx lower_old =
+                            R[i][k];
+
+                        cplx upper_new =
+                            complex_add(
+                                complex_scale(
+                                    upper_old,
+                                    c
+                                ),
+                                complex_multiply(
+                                    s,
+                                    lower_old
+                                )
+                            );
+
+                        cplx lower_new =
+                            complex_subtract(
+                                complex_scale(
+                                    lower_old,
+                                    c
+                                ),
+                                complex_multiply(
+                                    conjugate_s,
+                                    upper_old
+                                )
+                            );
+
+                        R[i - 1][k] =
+                            upper_new;
+
+                        R[i][k] =
+                            lower_new;
+                    }
+
+                    R[i][j] =
+                        cplx(0.0, 0.0);
+
+                UPDATE_Q:
+                    for (int k = 0;
+                         k < N;
+                         k++)
+                    {
+#pragma HLS PIPELINE
+
+                        cplx left_old =
+                            Q[k][i - 1];
+
+                        cplx right_old =
+                            Q[k][i];
+
+                        cplx left_new =
+                            complex_add(
+                                complex_scale(
+                                    left_old,
+                                    c
+                                ),
+                                complex_multiply(
+                                    conjugate_s,
+                                    right_old
+                                )
+                            );
+
+                        cplx right_new =
+                            complex_subtract(
+                                complex_scale(
+                                    right_old,
+                                    c
+                                ),
+                                complex_multiply(
+                                    s,
+                                    left_old
+                                )
+                            );
+
+                        Q[k][i - 1] =
+                            left_new;
+
+                        Q[k][i] =
+                            right_new;
+                    }
+                }
+            }
+        }
+    }
+}
+
+This remains a complex Givens QR decomposition. It uses a complex s and its conjugate.
+
+
+---
+
+4. Final  multiplication source
+
+Keep qh_multiply.h and its testbench. Replace only qh_multiply.cpp.
+
+qh_multiply.cpp
+
+#include "qh_multiply.h"
+
+void qh_multiply(
+    const cplx Q[N][N],
+    const cplx a[N],
+    cplx y[N]
+)
+{
+QH_OUTPUT_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+        double sum_real = 0.0;
+        double sum_imag = 0.0;
+
+    QH_ACCUMULATION_LOOP:
+        for (int j = 0; j < N; j++)
+        {
+#pragma HLS PIPELINE
+
+            /*
+             * conj(Q[j][i]) * a[j]
+             */
+            double q_real =
+                Q[j][i].real();
+
+            double q_imag =
+                Q[j][i].imag();
+
+            double a_real =
+                a[j].real();
+
+            double a_imag =
+                a[j].imag();
+
+            sum_real +=
+                q_real * a_real +
+                q_imag * a_imag;
+
+            sum_imag +=
+                q_real * a_imag -
+                q_imag * a_real;
+        }
+
+        y[i] =
+            cplx(
+                sum_real,
+                sum_imag
+            );
+    }
+}
+
+The accumulation recurrence may prevent II = 1. Since no fixed II is requested, Vitis can select the achievable II.
+
+
+---
+
+5. Final back-substitution source
+
+Keep backsub.h and tb_backsub.cpp. Replace only backsub.cpp.
+
+backsub.cpp
+
+#include "backsub.h"
+
+static cplx complex_multiply(
+    cplx first,
+    cplx second
+)
+{
+#pragma HLS INLINE
+
+    double ar = first.real();
+    double ai = first.imag();
+
+    double br = second.real();
+    double bi = second.imag();
+
+    return cplx(
+        ar * br - ai * bi,
+        ar * bi + ai * br
+    );
+}
+
+static cplx complex_subtract(
+    cplx first,
+    cplx second
+)
+{
+#pragma HLS INLINE
+
+    return cplx(
+        first.real() - second.real(),
+        first.imag() - second.imag()
+    );
+}
+
+static cplx complex_divide(
+    cplx numerator,
+    cplx denominator
+)
+{
+#pragma HLS INLINE
+
+    double nr = numerator.real();
+    double ni = numerator.imag();
+
+    double dr = denominator.real();
+    double di = denominator.imag();
+
+    double denominator_power =
+        dr * dr +
+        di * di;
+
+    /*
+     * A valid Ru must not have a zero diagonal.
+     * The testbench checks this before execution.
+     */
+    if (denominator_power < 1.0e-30)
+    {
+        return cplx(0.0, 0.0);
+    }
+
+    return cplx(
+        (nr * dr + ni * di) /
+            denominator_power,
+
+        (ni * dr - nr * di) /
+            denominator_power
+    );
+}
+
+void back_substitution(
+    cplx R[N][N],
+    cplx b[N],
+    cplx x[N]
+)
+{
+BACKSUB_OUTER:
+    for (int i = N - 1;
+         i >= 0;
+         i--)
+    {
+        cplx sum =
+            b[i];
+
+    BACKSUB_INNER:
+        for (int j = i + 1;
+             j < N;
+             j++)
+        {
+#pragma HLS PIPELINE
+
+            cplx product =
+                complex_multiply(
+                    R[i][j],
+                    x[j]
+                );
+
+            sum =
+                complex_subtract(
+                    sum,
+                    product
+                );
+        }
+
+        x[i] =
+            complex_divide(
+                sum,
+                R[i][i]
+            );
+    }
+}
+
+Back substitution is recursive:
+
+x[63] must be calculated before x[62]
+x[62] must be calculated before x[61]
+...
+
+Therefore, some dependency warning is natural and should not be “fixed” by forcing II=1.
+
+
+---
+
+How to apply these versions
+
+After normalization and the unoptimized mvdr_top pass:
+
+1. Replace steering_vec.cpp
+2. Run C simulation
+3. Run C synthesis
+4. Save latency/resource report
+
+5. Replace covariance.cpp
+6. Run C simulation
+7. Run C synthesis
+8. Save report
+
+9. Replace qr.cpp
+10. Run C simulation
+11. Run C synthesis
+12. Save report
+
+13. Replace qh_multiply.cpp
+14. Run C simulation
+15. Run C synthesis
+
+16. Replace backsub.cpp
+17. Run C simulation
+18. Run C synthesis
+
+Do not assume that every pragma improves the report. ARRAY_PARTITION can increase memory ports and throughput, but it can also increase registers, BRAM banking, and interface complexity. AMD recommends using it when memory-port conflicts are the actual bottleneck. 
+
+For now, these versions use only conservative loop pipelining and the covariance Hermitian optimization. Save the original no-pragma solutions so that you can compare:
+
+Latency before
+Latency after
+DSP before/after
+BRAM before/after
+LUT and FF before/after
+Achieved II
+
+The final combined AXI IP should be optimized only after the complete mvdr_top passes. DATAFLOW is useful only when stages can overlap through proper channels or buffers; simply adding it around large shared arrays does not guarantee concurrency. 
+
+
+
+
+
+
+
+
+
+
+Use two copies of each HLS project:
+
+backsub_baseline     → original code, no pragmas
+backsub_optimized    → final code with pragmas
+
+Do the same for QRD, covariance, steering and . This is safer than overwriting the working project.
+
+Step 1: Preserve the baseline
+
+For example:
+
+C:\mvdr_hls\qrd_baseline\
+C:\mvdr_hls\qrd_optimized\
+
+Copy the entire successfully synthesized QRD project into both folders.
+
+Do not modify qrd_baseline.
+
+Put the pragma version in qrd_optimized.
+
+Use the same FPGA part: xcvc1902-vsva2197-2MP-e-S.
+
+Use the same clock: 10 ns.
+
+Use the same data type, top function and testbench.
+
+
+Otherwise, the comparison will not be fair.
+
+Step 2: Open the baseline synthesis report
+
+In Vitis HLS 2024.2:
+
+1. Open the baseline component.
+
+
+2. Run C Synthesis.
+
+
+3. When synthesis completes, open Synthesis Summary or C Synthesis Report.
+
+
+4. Look at these sections:
+
+
+
+Performance estimates
+
+Record:
+
+Latency in clock cycles
+Latency in nanoseconds
+Interval / initiation interval
+Estimated clock period
+
+The synthesis report presents latency, iteration latency, interval and pipelining information. Latency is the number of cycles required to complete a function or loop. 
+
+Resource estimates
+
+Record:
+
+BRAM_18K
+DSP
+FF
+LUT
+URAM, if reported
+
+These values appear under Utilization Estimates in the HLS synthesis report. 
+
+Loop table
+
+Expand the function hierarchy and find important loops such as:
+
+SNAPSHOT_LOOP
+UPDATE_R
+UPDATE_Q
+BACKSUB_INNER
+QH_ACCUMULATION_LOOP
+
+Record:
+
+Loop latency
+Iteration latency
+Trip count
+Interval / achieved II
+Whether it is pipelined
+
+Step 3: Record baseline results
+
+Create a small table in your notebook or report:
+
+Module	Version	Latency cycles	Interval/II	BRAM	DSP	FF	LUT
+
+QRD	No pragmas						
+QRD	Optimized						
+Backsub	No pragmas						
+Backsub	Optimized						
+
+
+Also note:
+
+Target clock period = 10 ns
+Estimated clock period = ...
+
+Step 4: Run the optimized project
+
+Open qrd_optimized, replace only qr.cpp with the optimized source and run:
+
+C Simulation
+C Synthesis
+
+C simulation must still pass before you accept the optimization.
+
+Open the optimized synthesis report and enter its values in the second row.
+
+Where exactly to look
+
+The summary typically contains something similar to:
+
+Performance & Resource Estimates
+
+Timing:
+Target Clock Period
+Estimated Clock Period
+
+Latency:
+Latency Min
+Latency Max
+Interval Min
+Interval Max
+
+Utilization Estimates:
+BRAM_18K
+DSP
+FF
+LUT
+URAM
+
+For loops, you may see:
+
+Loop Name             Latency    Iteration Latency    Interval
+UPDATE_R               ...              ...              ...
+UPDATE_Q               ...              ...              ...
+
+The Interval column is the achieved initiation interval for a pipelined loop. A requested II may not be achieved when data or memory dependencies exist; Vitis can report a larger actual II. 
+
+Example interpretation
+
+Suppose QRD gives:
+
+Metric	No pragma	Optimized
+
+Latency	600,000 cycles	420,000 cycles
+DSP	40	76
+BRAM	32	40
+FF	20,000	28,000
+LUT	18,000	25,000
+UPDATE_R II	Not pipelined	8
+
+
+Interpretation:
+
+> Pipelining reduced QRD latency by 30%, but increased DSP, BRAM, FF and LUT utilization. The requested parallelism was limited by matrix memory access and loop-carried dependencies.
+
+
+
+An optimization is not automatically better just because it has pragmas. A useful optimization should reduce latency or improve interval without exceeding the FPGA resources.
+
+Take screenshots
+
+For each module, save screenshots of:
+
+1. C-simulation pass
+
+
+2. Baseline synthesis summary
+
+
+3. Optimized synthesis summary
+
+
+4. Loop performance table
+
+
+5. Any II/dependency warning
+
+
+6. Resource-utilization table
+
+
+
+These provide strong evidence in your internship report.
+
+Important distinction
+
+Latency: cycles required for one complete function execution.
+
+II/Interval: cycles between starting consecutive loop iterations or function transactions.
+
+Iteration latency: cycles for one loop iteration to complete.
+
+Resource usage: hardware required to implement the design.
+
+
+For back substitution, an II warning can remain because each result depends on weights calculated in previous iterations. For covariance and , accumulation also creates a recurrence dependency. That does not invalidate synthesis.
+
+Report file location
+
+Vitis also stores synthesis reports under the component’s generated work directory, usually around:
+
+<component_work_dir>\hls\syn\report\
+
+Your earlier log already showed:
+
+givens_qr\hls\syn\report\
+
+Do not delete the baseline work directory until you have copied the report values and screenshots.
+
+Best workflow for you
+
+Baseline project
+   ↓ C synthesis
+Record report
+   ↓
+Duplicate project
+   ↓
+Add pragmas
+   ↓ C simulation
+   ↓ C synthesis
+Record report
+   ↓
+Compare latency, II and resources
+
+Start with one block—preferably back substitution or —to learn the comparison process before doing the much larger covariance and QRD blocks.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes. Finish the no-pragma normalization and no-pragma mvdr_top verification first. After both pass, use these final versions.
+
+For the combined top, the safest structure is to reuse the six verified module files rather than copying the complete algorithms again inside mvdr_top.cpp.
+
+
+---
+
+1. Final normalization version
+
+Keep your existing:
+
+normalize_weights.h
+tb_normalize_weights.cpp
+
+Replace only normalize_weights.cpp.
+
+normalize_weights.cpp
+
+#include "normalize_weights.h"
+
+/*
+ * Manual complex division:
+ *
+ * numerator   = nr + j*ni
+ * denominator = dr + j*di
+ */
+static cplx complex_divide(
+    cplx numerator,
+    cplx denominator
+)
+{
+#pragma HLS INLINE
+
+    double nr = numerator.real();
+    double ni = numerator.imag();
+
+    double dr = denominator.real();
+    double di = denominator.imag();
+
+    double denominator_power =
+        dr * dr +
+        di * di;
+
+    /*
+     * Prevent NaN for invalid input.
+     *
+     * In a valid MVDR calculation,
+     * a^H * w_unnorm must not be zero.
+     */
+    if (denominator_power < 1.0e-30)
+    {
+        return cplx(0.0, 0.0);
+    }
+
+    double output_real =
+        (
+            nr * dr +
+            ni * di
+        ) /
+        denominator_power;
+
+    double output_imag =
+        (
+            ni * dr -
+            nr * di
+        ) /
+        denominator_power;
+
+    return cplx(
+        output_real,
+        output_imag
+    );
+}
+
+void normalize_weights(
+    const cplx a[N],
+    const cplx w_in[N],
+    cplx w_out[N]
+)
+{
+    double denominator_real = 0.0;
+    double denominator_imag = 0.0;
+
+    /*
+     * Calculate:
+     *
+     * denominator = a^H * w_in
+     *
+     * conj(a) * w:
+     *
+     * real = ar*wr + ai*wi
+     * imag = ar*wi - ai*wr
+     */
+NORMALIZATION_DOT_PRODUCT:
+    for (int i = 0; i < N; i++)
+    {
+#pragma HLS PIPELINE
+
+        double ar =
+            a[i].real();
+
+        double ai =
+            a[i].imag();
+
+        double wr =
+            w_in[i].real();
+
+        double wi =
+            w_in[i].imag();
+
+        denominator_real +=
+            ar * wr +
+            ai * wi;
+
+        denominator_imag +=
+            ar * wi -
+            ai * wr;
+    }
+
+    cplx denominator(
+        denominator_real,
+        denominator_imag
+    );
+
+    /*
+     * Normalize every raw weight:
+     *
+     * w_out = w_in / denominator
+     */
+NORMALIZATION_OUTPUT_LOOP:
+    for (int i = 0; i < N; i++)
+    {
+#pragma HLS PIPELINE
+
+        w_out[i] =
+            complex_divide(
+                w_in[i],
+                denominator
+            );
+    }
+}
+
+Because the first loop contains floating-point accumulation, the achieved II may be greater than one. The PIPELINE directive asks HLS to pipeline the loop, but data dependencies can make the achieved II larger than the requested or ideal value. 
+
+Expected C-simulation checks
+
+Relative weight error   < 1e-6
+Maximum element error   < 1e-6
+a_s^H × w_hls           ≈ (1,0)
+|w_hls^H × a_s|         ≈ 1
+WEIGHT NORMALIZATION TEST PASSED
+
+
+---
+
+2. Final combined mvdr_top
+
+For the combined project, do not paste another copy of every algorithm into mvdr_top.cpp.
+
+Instead, the top should call the already verified functions:
+
+steering_vec
+covariance_matrix
+givens_qr
+qh_multiply
+back_substitution
+normalize_weights
+
+This avoids maintaining two different QRD implementations or two different covariance implementations.
+
+Final project structure
+
+Create a new folder:
+
+C:\mvdr_hls\mvdr_top_optimized\
+
+Place these files inside:
+
+mvdr_top.h
+mvdr_top.cpp
+tb_mvdr_top.cpp
+
+steering_vec.h
+steering_vec.cpp
+
+covariance.h
+covariance.cpp
+
+qr.h
+qr.cpp
+
+qh_multiply.h
+qh_multiply.cpp
+
+backsub.h
+backsub.cpp
+
+normalize_weights.h
+normalize_weights.cpp
+
+Xtrain_real.csv
+Xtrain_imag.csv
+a_s_real.csv
+a_s_imag.csv
+w_real.csv
+w_imag.csv
+
+Use the final pragma versions of the six module .cpp files.
+
+
+---
+
+mvdr_top.h
+
+#ifndef MVDR_TOP_H
+#define MVDR_TOP_H
+
+#include <complex>
+
+#define N 64
+#define K 5000
+
+typedef std::complex<double> cplx;
+
+/*
+ * Complete MVDR weight-generation pipeline.
+ *
+ * Input:
+ *   Xtrain = 64 x 5000 complex training matrix
+ *   az_deg = target azimuth
+ *   el_deg = target elevation
+ *   d      = spacing in wavelength units
+ *
+ * Output:
+ *   w_out = 64 normalized MVDR weights
+ */
+void mvdr_top(
+    const cplx Xtrain[N][K],
+    double az_deg,
+    double el_deg,
+    double d,
+    cplx w_out[N]
+);
+
+#endif
+
+
+---
+
+mvdr_top.cpp
+
+#include "mvdr_top.h"
+
+#include "steering_vec.h"
+#include "covariance.h"
+#include "qr.h"
+#include "qh_multiply.h"
+#include "backsub.h"
+#include "normalize_weights.h"
+
+void mvdr_top(
+    const cplx Xtrain[N][K],
+    double az_deg,
+    double el_deg,
+    double d,
+    cplx w_out[N]
+)
+{
+    /*
+     * Target steering vector.
+     */
+    cplx a_s[N];
+
+    /*
+     * Loaded covariance matrix.
+     */
+    cplx R[N][N];
+
+    /*
+     * QR-decomposition results.
+     */
+    cplx Q[N][N];
+    cplx Ru[N][N];
+
+    /*
+     * Q^H * a_s.
+     */
+    cplx y[N];
+
+    /*
+     * Raw solution before MVDR normalization.
+     */
+    cplx w_unnorm[N];
+
+    /*
+     * Stage 1:
+     *
+     * Generate target steering vector.
+     */
+    steering_vec(
+        az_deg,
+        el_deg,
+        d,
+        a_s
+    );
+
+    /*
+     * Stage 2:
+     *
+     * R = Xtrain * Xtrain^H / K
+     *
+     * Then diagonal loading is added.
+     */
+    covariance_matrix(
+        Xtrain,
+        R
+    );
+
+    /*
+     * Stage 3:
+     *
+     * R = Q * Ru
+     */
+    givens_qr(
+        R,
+        Q,
+        Ru
+    );
+
+    /*
+     * Stage 4:
+     *
+     * y = Q^H * a_s
+     */
+    qh_multiply(
+        Q,
+        a_s,
+        y
+    );
+
+    /*
+     * Stage 5:
+     *
+     * Solve:
+     *
+     * Ru * w_unnorm = y
+     */
+    back_substitution(
+        Ru,
+        y,
+        w_unnorm
+    );
+
+    /*
+     * Stage 6:
+     *
+     * w_out =
+     * w_unnorm / (a_s^H * w_unnorm)
+     */
+    normalize_weights(
+        a_s,
+        w_unnorm,
+        w_out
+    );
+}
+
+There are intentionally no additional pragmas inside this wrapper. The optimization pragmas already exist inside each module.
+
+Do not add:
+
+#pragma HLS DATAFLOW
+
+yet. DATAFLOW is intended to overlap producers and consumers by creating channels between functions or loops. Your current stages exchange large complete matrices and use std::complex, so first obtain a stable combined synthesis before attempting task-level overlap. 
+
+
+---
+
+3. Design files to add in Vitis HLS
+
+Add all of these as Design Files:
+
+mvdr_top.cpp
+mvdr_top.h
+
+steering_vec.cpp
+steering_vec.h
+
+covariance.cpp
+covariance.h
+
+qr.cpp
+qr.h
+
+qh_multiply.cpp
+qh_multiply.h
+
+backsub.cpp
+backsub.h
+
+normalize_weights.cpp
+normalize_weights.h
+
+Set:
+
+Top function: mvdr_top
+
+Vitis HLS uses the selected top function and synthesizes the functions called below it from the design sources. 
+
+Add these as Testbench Files:
+
+tb_mvdr_top.cpp
+
+Xtrain_real.csv
+Xtrain_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+
+w_real.csv
+w_imag.csv
+
+You do not need:
+
+a_i1_real.csv
+a_i1_imag.csv
+a_i2_real.csv
+a_i2_imag.csv
+
+for the combined weight-generation test.
+
+
+---
+
+4. One likely compilation issue
+
+Your separate headers may all contain:
+
+#define N 64
+typedef std::complex<double> cplx;
+
+Because the definitions are identical, it may compile normally. But if Vitis reports macro-redefinition messages, use this safer pattern in every header:
+
+#ifndef MVDR_COMMON_DEFINITIONS
+#define MVDR_COMMON_DEFINITIONS
+
+#include <complex>
+
+#define N 64
+#define K 5000
+
+typedef std::complex<double> cplx;
+
+#endif
+
+An even cleaner solution is one common header.
+
+Optional mvdr_common.h
+
+#ifndef MVDR_COMMON_H
+#define MVDR_COMMON_H
+
+#include <complex>
+
+#define NX 8
+#define NY 8
+#define N  64
+#define K  5000
+
+#define PI 3.14159265358979323846
+
+typedef std::complex<double> cplx;
+
+#endif
+
+Then every module header can begin with:
+
+#include "mvdr_common.h"
+
+However, do not refactor all headers immediately when your isolated projects are already working. First try the combined project using the current headers.
+
+
+---
+
+5. Baseline versus optimized mvdr_top
+
+Keep two complete projects:
+
+mvdr_top_baseline
+mvdr_top_optimized
+
+Baseline project
+
+Use:
+
+Original no-pragma steering
+Original no-pragma covariance
+Original no-pragma QRD
+Original no-pragma QH multiply
+Original no-pragma backsub
+Original no-pragma normalization
+Same mvdr_top wrapper
+
+Optimized project
+
+Use:
+
+Final steering with pragmas
+Final covariance with Hermitian optimization
+Final QRD with pragmas
+Final QH multiply with pragmas
+Final backsub with pragmas
+Final normalization with pragmas
+Same mvdr_top wrapper
+
+The wrapper must remain identical. Only the module implementations should change.
+
+That gives a fair comparison.
+
+
+---
+
+6. Verification order
+
+Run the remaining blocks in this order:
+
+1. No-pragma normalization C simulation
+2. No-pragma normalization C synthesis
+
+3. No-pragma mvdr_top C simulation
+4. No-pragma mvdr_top C synthesis
+
+After both pass:
+
+5. Optimized normalization C simulation
+6. Optimized normalization C synthesis
+
+7. Optimized mvdr_top C simulation
+8. Optimized mvdr_top C synthesis
+
+Do not run optimized mvdr_top before verifying the optimized normalization separately.
+
+
+---
+
+7. What to record for normalization
+
+From the normalization synthesis report, record:
+
+Metric	Baseline	Optimized
+
+Top latency cycles		
+Interval		
+Estimated clock period		
+DSP		
+BRAM		
+FF		
+LUT		
+Dot-product achieved II		
+Output-loop achieved II		
+
+
+The output division loop may consume substantial DSP resources because it performs double-precision complex division.
+
+
+---
+
+8. What to record for mvdr_top
+
+Record the top-level values:
+
+Metric	Baseline	Optimized
+
+Overall latency cycles		
+Overall interval		
+Estimated clock period		
+BRAM		
+DSP		
+FF		
+LUT		
+URAM		
+
+
+Also expand the hierarchy and record the latency of:
+
+steering_vec
+covariance_matrix
+givens_qr
+qh_multiply
+back_substitution
+normalize_weights
+
+The top-level latency will probably be dominated by:
+
+Covariance
+QR decomposition
+
+The steering, , back-substitution and normalization stages will be much smaller.
+
+
+---
+
+9. Expected combined result
+
+The important C-simulation output should be approximately:
+
+Relative weight error < 1e-6
+
+a_s^H * w_hls ≈ (1, 0)
+
+|w_hls^H * a_s| ≈ 1
+
+COMBINED MVDR TOP TEST PASSED
+
+After this optimized combined version synthesizes, the next change is not more mathematical optimization. The next step is the AXI-compatible top wrapper with flattened real and imaginary ports.
