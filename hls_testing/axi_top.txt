@@ -1,0 +1,1626 @@
+You should create a new final AXI project. Do not modify or damage the isolated working projects.
+
+The main change is:
+
+Current top-level ports:
+std::complex<double> Xtrain[64][5000]
+std::complex<double> w[64]
+
+AXI-compatible ports:
+double Xtrain_real[320000]
+double Xtrain_imag[320000]
+double w_real[64]
+double w_imag[64]
+
+The top-level AXI ports contain only ordinary real-valued arrays. Internally, QRD, , back substitution and normalization can continue using std::complex<double>.
+
+m_axi is used for arrays stored in external DDR, while s_axilite carries control values and the DDR base addresses. Multiple pointer arguments given the same bundle name share one AXI master adapter, which makes your first Vivado block design simpler. 
+
+Final architecture
+
+DDR:
+Xtrain_real[320000]
+Xtrain_imag[320000]
+        │
+        │ One AXI master interface
+        ▼
+mvdr_top_axi
+        │
+        ├── Covariance calculation
+        ├── Steering vector
+        ├── QR decomposition
+        ├── Qᴴa
+        ├── Back substitution
+        └── Normalization
+        │
+        ▼
+DDR:
+w_real[64]
+w_imag[64]
+
+The complete 64×5000 complex matrix is not copied into an internal complex array. The covariance stage reads flattened samples directly from external memory.
+
+
+---
+
+1. Create mvdr_axi_top.h
+
+#ifndef MVDR_AXI_TOP_H
+#define MVDR_AXI_TOP_H
+
+#define MVDR_AXI_N        64
+#define MVDR_AXI_K        5000
+#define MVDR_AXI_SAMPLES  320000
+
+/*
+ * Flattening order:
+ *
+ * index = sensor_index * MVDR_AXI_K
+ *         + snapshot_index
+ *
+ * This corresponds to:
+ *
+ * Xtrain[sensor][snapshot]
+ */
+void mvdr_top_axi(
+    const double Xtrain_real[MVDR_AXI_SAMPLES],
+    const double Xtrain_imag[MVDR_AXI_SAMPLES],
+
+    double az_deg,
+    double el_deg,
+    double d,
+
+    double w_real[MVDR_AXI_N],
+    double w_imag[MVDR_AXI_N]
+);
+
+#endif
+
+
+---
+
+2. Create mvdr_axi_top.cpp
+
+This wrapper uses your already verified:
+
+steering_vec
+givens_qr
+qh_multiply
+back_substitution
+normalize_weights
+
+The covariance is calculated directly from flattened AXI inputs.
+
+#include "mvdr_axi_top.h"
+
+#include "steering_vec.h"
+#include "qr.h"
+#include "qh_multiply.h"
+#include "backsub.h"
+#include "normalize_weights.h"
+
+/*
+ * =====================================================
+ * COVARIANCE FROM FLATTENED AXI ARRAYS
+ * =====================================================
+ *
+ * Input arrangement:
+ *
+ * Xtrain_real[sensor * K + snapshot]
+ * Xtrain_imag[sensor * K + snapshot]
+ *
+ * Covariance:
+ *
+ * R(i,j) = sum_k X(i,k) * conj(X(j,k)) / K
+ *
+ * Only the upper triangle is calculated.
+ * The lower triangle is generated using:
+ *
+ * R(j,i) = conj(R(i,j))
+ */
+static void covariance_from_axi(
+    const double Xtrain_real[MVDR_AXI_SAMPLES],
+    const double Xtrain_imag[MVDR_AXI_SAMPLES],
+    cplx R[N][N]
+)
+{
+    const double INV_K =
+        1.0 / (double)MVDR_AXI_K;
+
+COVARIANCE_ROW:
+    for (int i = 0; i < MVDR_AXI_N; i++)
+    {
+    COVARIANCE_COLUMN:
+        for (int j = i; j < MVDR_AXI_N; j++)
+        {
+            double sum_real = 0.0;
+            double sum_imag = 0.0;
+
+        COVARIANCE_SNAPSHOT:
+            for (
+                int k = 0;
+                k < MVDR_AXI_K;
+                k++
+            )
+            {
+                int index_i =
+                    i * MVDR_AXI_K + k;
+
+                int index_j =
+                    j * MVDR_AXI_K + k;
+
+                double xi_real =
+                    Xtrain_real[index_i];
+
+                double xi_imag =
+                    Xtrain_imag[index_i];
+
+                double xj_real =
+                    Xtrain_real[index_j];
+
+                double xj_imag =
+                    Xtrain_imag[index_j];
+
+                /*
+                 * (xi_real + j xi_imag)
+                 *
+                 * multiplied by:
+                 *
+                 * conj(xj_real + j xj_imag)
+                 */
+                sum_real +=
+                    xi_real * xj_real +
+                    xi_imag * xj_imag;
+
+                sum_imag +=
+                    xi_imag * xj_real -
+                    xi_real * xj_imag;
+            }
+
+            double covariance_real =
+                sum_real * INV_K;
+
+            double covariance_imag =
+                sum_imag * INV_K;
+
+            R[i][j] =
+                cplx(
+                    covariance_real,
+                    covariance_imag
+                );
+
+            /*
+             * Hermitian lower triangle.
+             */
+            if (i != j)
+            {
+                R[j][i] =
+                    cplx(
+                        covariance_real,
+                        -covariance_imag
+                    );
+            }
+        }
+    }
+
+    /*
+     * Diagonal loading:
+     *
+     * delta = 0.01 * trace(R) / N
+     */
+    double trace_real = 0.0;
+
+TRACE_LOOP:
+    for (int i = 0; i < MVDR_AXI_N; i++)
+    {
+        trace_real +=
+            R[i][i].real();
+    }
+
+    double delta =
+        0.01 *
+        trace_real /
+        (double)MVDR_AXI_N;
+
+DIAGONAL_LOADING_LOOP:
+    for (int i = 0; i < MVDR_AXI_N; i++)
+    {
+        R[i][i] =
+            cplx(
+                R[i][i].real() + delta,
+                0.0
+            );
+    }
+}
+
+/*
+ * =====================================================
+ * AXI TOP FUNCTION
+ * =====================================================
+ */
+
+void mvdr_top_axi(
+    const double Xtrain_real[MVDR_AXI_SAMPLES],
+    const double Xtrain_imag[MVDR_AXI_SAMPLES],
+
+    double az_deg,
+    double el_deg,
+    double d,
+
+    double w_real[MVDR_AXI_N],
+    double w_imag[MVDR_AXI_N]
+)
+{
+    /*
+     * One memory-master interface.
+     *
+     * This is simpler for the first Vivado
+     * block-design integration.
+     */
+#pragma HLS INTERFACE mode=m_axi \
+    port=Xtrain_real \
+    offset=slave \
+    bundle=gmem \
+    depth=320000
+
+#pragma HLS INTERFACE mode=m_axi \
+    port=Xtrain_imag \
+    offset=slave \
+    bundle=gmem \
+    depth=320000
+
+#pragma HLS INTERFACE mode=m_axi \
+    port=w_real \
+    offset=slave \
+    bundle=gmem \
+    depth=64
+
+#pragma HLS INTERFACE mode=m_axi \
+    port=w_imag \
+    offset=slave \
+    bundle=gmem \
+    depth=64
+
+    /*
+     * AXI-Lite control-register interface.
+     *
+     * The processor writes:
+     * - DDR addresses
+     * - target angles
+     * - antenna spacing
+     * - start command
+     */
+#pragma HLS INTERFACE mode=s_axilite \
+    port=Xtrain_real \
+    bundle=control
+
+#pragma HLS INTERFACE mode=s_axilite \
+    port=Xtrain_imag \
+    bundle=control
+
+#pragma HLS INTERFACE mode=s_axilite \
+    port=w_real \
+    bundle=control
+
+#pragma HLS INTERFACE mode=s_axilite \
+    port=w_imag \
+    bundle=control
+
+#pragma HLS INTERFACE mode=s_axilite \
+    port=az_deg \
+    bundle=control
+
+#pragma HLS INTERFACE mode=s_axilite \
+    port=el_deg \
+    bundle=control
+
+#pragma HLS INTERFACE mode=s_axilite \
+    port=d \
+    bundle=control
+
+#pragma HLS INTERFACE mode=s_axilite \
+    port=return \
+    bundle=control
+
+    /*
+     * Internal matrices and vectors.
+     */
+    cplx a_s[N];
+
+    cplx R[N][N];
+
+    cplx Q[N][N];
+    cplx Ru[N][N];
+
+    cplx y[N];
+
+    cplx w_unnorm[N];
+    cplx w_complex[N];
+
+    /*
+     * Stage 1:
+     * Generate target steering vector.
+     */
+    steering_vec(
+        az_deg,
+        el_deg,
+        d,
+        a_s
+    );
+
+    /*
+     * Stage 2:
+     * Read flattened data through AXI and
+     * calculate loaded covariance matrix.
+     */
+    covariance_from_axi(
+        Xtrain_real,
+        Xtrain_imag,
+        R
+    );
+
+    /*
+     * Stage 3:
+     * R = Q * Ru
+     */
+    givens_qr(
+        R,
+        Q,
+        Ru
+    );
+
+    /*
+     * Stage 4:
+     * y = Q^H * a_s
+     */
+    qh_multiply(
+        Q,
+        a_s,
+        y
+    );
+
+    /*
+     * Stage 5:
+     * Ru * w_unnorm = y
+     */
+    back_substitution(
+        Ru,
+        y,
+        w_unnorm
+    );
+
+    /*
+     * Stage 6:
+     * Final distortionless normalization.
+     */
+    normalize_weights(
+        a_s,
+        w_unnorm,
+        w_complex
+    );
+
+    /*
+     * Stage 7:
+     * Split complex output into separate
+     * real and imaginary AXI buffers.
+     */
+WRITE_WEIGHTS:
+    for (int i = 0; i < MVDR_AXI_N; i++)
+    {
+#pragma HLS PIPELINE
+
+        w_real[i] =
+            w_complex[i].real();
+
+        w_imag[i] =
+            w_complex[i].imag();
+    }
+}
+
+For the first AXI test, do not add DATAFLOW. Your functions exchange complete matrices, and making them overlap safely would require a different buffered or streaming architecture.
+
+
+---
+
+3. Do not use the old covariance source in this final project
+
+The AXI wrapper already contains:
+
+covariance_from_axi(...)
+
+Therefore, the final AXI project does not need:
+
+covariance.cpp
+covariance.h
+
+Keep the isolated covariance project safely. It remains useful for your report and baseline verification.
+
+The final AXI project uses:
+
+mvdr_axi_top.cpp
+mvdr_axi_top.h
+
+steering_vec.cpp
+steering_vec.h
+
+qr.cpp
+qr.h
+
+qh_multiply.cpp
+qh_multiply.h
+
+backsub.cpp
+backsub.h
+
+normalize_weights.cpp
+normalize_weights.h
+
+Set the top function as:
+
+mvdr_top_axi
+
+Do not add your old mvdr_top.cpp as a design file in this project.
+
+
+---
+
+4. Modify the testbench input representation
+
+Your old testbench created:
+
+cplx Xtrain[64][5000];
+
+For the AXI testbench, create:
+
+static double
+    Xtrain_real[MVDR_AXI_SAMPLES];
+
+static double
+    Xtrain_imag[MVDR_AXI_SAMPLES];
+
+static double
+    w_hls_real[MVDR_AXI_N];
+
+static double
+    w_hls_imag[MVDR_AXI_N];
+
+Because the CSV reader already reads values row by row, you can copy the returned values directly:
+
+vector<double> real_values =
+    read_csv_values(
+        "Xtrain_real.csv"
+    );
+
+vector<double> imag_values =
+    read_csv_values(
+        "Xtrain_imag.csv"
+    );
+
+if (
+    real_values.size() !=
+        MVDR_AXI_SAMPLES ||
+
+    imag_values.size() !=
+        MVDR_AXI_SAMPLES
+)
+{
+    cerr
+        << "ERROR: Expected 320000 values "
+        << "in each Xtrain CSV."
+        << endl;
+
+    return 1;
+}
+
+for (
+    int index = 0;
+    index < MVDR_AXI_SAMPLES;
+    index++
+)
+{
+    Xtrain_real[index] =
+        real_values[index];
+
+    Xtrain_imag[index] =
+        imag_values[index];
+}
+
+Call the AXI top:
+
+mvdr_top_axi(
+    Xtrain_real,
+    Xtrain_imag,
+
+    40.0,   // target azimuth
+    0.0,    // target elevation
+    0.5,    // spacing
+
+    w_hls_real,
+    w_hls_imag
+);
+
+Convert the output for comparison:
+
+cplx w_hls[N];
+
+for (int i = 0; i < N; i++)
+{
+    w_hls[i] =
+        cplx(
+            w_hls_real[i],
+            w_hls_imag[i]
+        );
+}
+
+After that, reuse the same weight-error and target-gain checks from your existing tb_mvdr_top.cpp.
+
+
+---
+
+5. CSV arrangement
+
+The flattened arrangement must be:
+
+Sensor 0:
+X(0,0), X(0,1), ... X(0,4999)
+
+Sensor 1:
+X(1,0), X(1,1), ... X(1,4999)
+
+...
+
+Sensor 63:
+X(63,0), ... X(63,4999)
+
+The index is:
+
+index =
+    sensor * 5000 +
+    snapshot;
+
+Your current MATLAB CSV is already written as a 64×5000 matrix. Your CSV reader reads row 0 completely, then row 1, so it naturally produces this flattening order.
+
+You do not need to regenerate the MATLAB Xtrain CSV.
+
+
+---
+
+6. Required testbench files
+
+Add:
+
+tb_mvdr_axi_top.cpp
+
+Xtrain_real.csv
+Xtrain_imag.csv
+
+w_real.csv
+w_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+
+You do not need:
+
+a_i1_real.csv
+a_i1_imag.csv
+a_i2_real.csv
+a_i2_imag.csv
+
+The corrupted interference-vector CSV is therefore irrelevant to this AXI top verification.
+
+
+---
+
+7. Run order
+
+Use this exact order:
+
+1. Finish no-pragma normalization
+2. Finish normal mvdr_top
+3. Create a separate mvdr_axi_top project
+4. Add the AXI wrapper and verified modules
+5. Set top = mvdr_top_axi
+6. Run C Simulation
+7. Check final weights against MATLAB
+8. Run C Synthesis
+9. Open Interface Summary
+10. Confirm AXI ports are generated
+11. Export RTL as Vivado IP
+
+The C-simulation result should remain approximately:
+
+Relative weight error < 1e-6
+a_s^H w ≈ (1,0)
+Target gain ≈ 1
+AXI MVDR TOP TEST PASSED
+
+
+---
+
+8. Expected exported IP ports
+
+After successful synthesis/export, your IP should mainly expose:
+
+ap_clk
+ap_rst_n
+
+s_axi_control
+m_axi_gmem
+
+interrupt
+
+Because all four memory arguments use the same gmem bundle, only one AXI memory-master interface is created. This is the easiest first version to connect to the Versal CIPS/NoC. The pointer base addresses and scalar arguments appear through the AXI-Lite control register map. 
+
+Later, only when the IP is working, you can split the memory ports into:
+
+gmem_real
+gmem_imag
+gmem_output
+
+That may improve bandwidth, but it creates more AXI connections and is not necessary for your first working FPGA integration.
+
+
+
+
+
+
+
+
+
+
+
+
+
+Replace the entire old tb_mvdr_top.cpp with the testbench below.
+Create a new file named:
+tb_mvdr_axi_top.cpp
+Remove the old tb_mvdr_top.cpp from the Vitis HLS Testbench Files list so that only this new testbench is compiled.
+Complete tb_mvdr_axi_top.cpp
+
+
+
+
+
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <complex>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
+#include "mvdr_axi_top.h"
+
+using namespace std;
+
+typedef std::complex<double> tb_cplx;
+
+/*
+ * =====================================================
+ * READ ALL NUMERICAL VALUES FROM A CSV FILE
+ * =====================================================
+ *
+ * Supports:
+ *   - comma-separated matrix files
+ *   - one-value-per-line vector files
+ *   - row-vector files
+ *   - column-vector files
+ */
+static vector<double> read_csv_values(
+    const char* filename
+)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr
+            << "ERROR: Cannot open file: "
+            << filename
+            << endl;
+
+        exit(1);
+    }
+
+    vector<double> values;
+    string line;
+
+    while (getline(file, line))
+    {
+        /*
+         * Replace commas with spaces so that
+         * stringstream can read every number.
+         */
+        for (size_t i = 0;
+             i < line.size();
+             i++)
+        {
+            if (line[i] == ',')
+            {
+                line[i] = ' ';
+            }
+        }
+
+        stringstream line_stream(line);
+
+        double value;
+
+        while (line_stream >> value)
+        {
+            values.push_back(value);
+        }
+    }
+
+    file.close();
+
+    return values;
+}
+
+/*
+ * =====================================================
+ * LOAD FLATTENED XTRAIN
+ * =====================================================
+ *
+ * MATLAB file dimensions:
+ *
+ * Xtrain_real.csv = 64 x 5000
+ * Xtrain_imag.csv = 64 x 5000
+ *
+ * Total values in each file:
+ *
+ * 64 x 5000 = 320000
+ *
+ * Flattened arrangement:
+ *
+ * index = sensor * 5000 + snapshot
+ */
+static void load_flattened_xtrain(
+    const char* real_filename,
+    const char* imag_filename,
+
+    double Xtrain_real[MVDR_AXI_SAMPLES],
+    double Xtrain_imag[MVDR_AXI_SAMPLES]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if (
+        (int)real_values.size() !=
+            MVDR_AXI_SAMPLES
+    )
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " must contain exactly "
+            << MVDR_AXI_SAMPLES
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected dimensions: "
+            << MVDR_AXI_N
+            << " x "
+            << MVDR_AXI_K
+            << endl;
+
+        exit(1);
+    }
+
+    if (
+        (int)imag_values.size() !=
+            MVDR_AXI_SAMPLES
+    )
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " must contain exactly "
+            << MVDR_AXI_SAMPLES
+            << " values."
+            << endl;
+
+        cerr
+            << "Expected dimensions: "
+            << MVDR_AXI_N
+            << " x "
+            << MVDR_AXI_K
+            << endl;
+
+        exit(1);
+    }
+
+    /*
+     * The CSV reader already reads the matrix
+     * row by row.
+     *
+     * Therefore:
+     *
+     * first 5000 values  -> sensor 0
+     * next 5000 values   -> sensor 1
+     * ...
+     * final 5000 values  -> sensor 63
+     */
+LOAD_XTRAIN_LOOP:
+    for (
+        int index = 0;
+        index < MVDR_AXI_SAMPLES;
+        index++
+    )
+    {
+        Xtrain_real[index] =
+            real_values[index];
+
+        Xtrain_imag[index] =
+            imag_values[index];
+    }
+
+    cout
+        << "Xtrain loaded successfully."
+        << endl;
+
+    cout
+        << "Flattened arrangement: "
+        << MVDR_AXI_N
+        << " sensors x "
+        << MVDR_AXI_K
+        << " snapshots."
+        << endl;
+
+    cout
+        << "First sample = ("
+        << Xtrain_real[0]
+        << ", "
+        << Xtrain_imag[0]
+        << ")"
+        << endl;
+
+    cout
+        << "Last sample = ("
+        << Xtrain_real[
+               MVDR_AXI_SAMPLES - 1
+           ]
+        << ", "
+        << Xtrain_imag[
+               MVDR_AXI_SAMPLES - 1
+           ]
+        << ")"
+        << endl;
+}
+
+/*
+ * =====================================================
+ * LOAD A 64-ELEMENT COMPLEX VECTOR
+ * =====================================================
+ */
+static void load_complex_vector(
+    const char* real_filename,
+    const char* imag_filename,
+
+    tb_cplx output[MVDR_AXI_N]
+)
+{
+    vector<double> real_values =
+        read_csv_values(real_filename);
+
+    vector<double> imag_values =
+        read_csv_values(imag_filename);
+
+    cout
+        << real_filename
+        << " values found = "
+        << real_values.size()
+        << endl;
+
+    cout
+        << imag_filename
+        << " values found = "
+        << imag_values.size()
+        << endl;
+
+    if (
+        (int)real_values.size() !=
+            MVDR_AXI_N
+    )
+    {
+        cerr
+            << "ERROR: "
+            << real_filename
+            << " must contain exactly "
+            << MVDR_AXI_N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+    if (
+        (int)imag_values.size() !=
+            MVDR_AXI_N
+    )
+    {
+        cerr
+            << "ERROR: "
+            << imag_filename
+            << " must contain exactly "
+            << MVDR_AXI_N
+            << " values."
+            << endl;
+
+        exit(1);
+    }
+
+LOAD_VECTOR_LOOP:
+    for (
+        int i = 0;
+        i < MVDR_AXI_N;
+        i++
+    )
+    {
+        output[i] =
+            tb_cplx(
+                real_values[i],
+                imag_values[i]
+            );
+    }
+}
+
+/*
+ * =====================================================
+ * CHECK WHETHER A COMPLEX VALUE IS FINITE
+ * =====================================================
+ */
+static bool complex_is_finite(
+    tb_cplx value
+)
+{
+    return
+        std::isfinite(value.real()) &&
+        std::isfinite(value.imag());
+}
+
+/*
+ * =====================================================
+ * CHECK COMPLETE VECTOR FOR NaN OR INFINITY
+ * =====================================================
+ */
+static bool vector_is_finite(
+    const tb_cplx vector_input[MVDR_AXI_N]
+)
+{
+    for (
+        int i = 0;
+        i < MVDR_AXI_N;
+        i++
+    )
+    {
+        if (!complex_is_finite(
+                vector_input[i]
+            ))
+        {
+            cerr
+                << "ERROR: Non-finite output "
+                << "at weight index "
+                << i
+                << endl;
+
+            cerr
+                << "Value = "
+                << vector_input[i]
+                << endl;
+
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/*
+ * =====================================================
+ * RELATIVE VECTOR ERROR
+ * =====================================================
+ *
+ * ||w_hls - w_matlab||2
+ * ---------------------
+ *      ||w_matlab||2
+ */
+static double relative_vector_error(
+    const tb_cplx reference[MVDR_AXI_N],
+    const tb_cplx result[MVDR_AXI_N]
+)
+{
+    double difference_power = 0.0;
+    double reference_power = 0.0;
+
+    for (
+        int i = 0;
+        i < MVDR_AXI_N;
+        i++
+    )
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double reference_real =
+            reference[i].real();
+
+        double reference_imag =
+            reference[i].imag();
+
+        difference_power +=
+            difference_real *
+            difference_real +
+
+            difference_imag *
+            difference_imag;
+
+        reference_power +=
+            reference_real *
+            reference_real +
+
+            reference_imag *
+            reference_imag;
+    }
+
+    if (reference_power < 1.0e-30)
+    {
+        cerr
+            << "ERROR: MATLAB weight vector "
+            << "has zero norm."
+            << endl;
+
+        return
+            numeric_limits<double>::infinity();
+    }
+
+    return std::sqrt(
+        difference_power /
+        reference_power
+    );
+}
+
+/*
+ * =====================================================
+ * MAXIMUM INDIVIDUAL WEIGHT ERROR
+ * =====================================================
+ */
+static double maximum_element_error(
+    const tb_cplx reference[MVDR_AXI_N],
+    const tb_cplx result[MVDR_AXI_N]
+)
+{
+    double maximum_error = 0.0;
+
+    for (
+        int i = 0;
+        i < MVDR_AXI_N;
+        i++
+    )
+    {
+        double difference_real =
+            result[i].real() -
+            reference[i].real();
+
+        double difference_imag =
+            result[i].imag() -
+            reference[i].imag();
+
+        double element_error =
+            std::sqrt(
+                difference_real *
+                difference_real +
+
+                difference_imag *
+                difference_imag
+            );
+
+        if (element_error > maximum_error)
+        {
+            maximum_error =
+                element_error;
+        }
+    }
+
+    return maximum_error;
+}
+
+/*
+ * =====================================================
+ * HERMITIAN DOT PRODUCT
+ * =====================================================
+ *
+ * result = first^H * second
+ *
+ * Testbench only.
+ */
+static tb_cplx hermitian_dot_product(
+    const tb_cplx first[MVDR_AXI_N],
+    const tb_cplx second[MVDR_AXI_N]
+)
+{
+    tb_cplx sum(
+        0.0,
+        0.0
+    );
+
+    for (
+        int i = 0;
+        i < MVDR_AXI_N;
+        i++
+    )
+    {
+        sum +=
+            std::conj(first[i]) *
+            second[i];
+    }
+
+    return sum;
+}
+
+/*
+ * =====================================================
+ * COMPLEX MAGNITUDE
+ * =====================================================
+ */
+static double complex_magnitude(
+    tb_cplx value
+)
+{
+    return std::sqrt(
+        value.real() *
+        value.real() +
+
+        value.imag() *
+        value.imag()
+    );
+}
+
+/*
+ * =====================================================
+ * MAIN TESTBENCH
+ * =====================================================
+ */
+int main()
+{
+    /*
+     * Static arrays prevent stack overflow.
+     *
+     * Each Xtrain array contains:
+     *
+     * 320000 doubles.
+     */
+    static double
+        Xtrain_real[MVDR_AXI_SAMPLES];
+
+    static double
+        Xtrain_imag[MVDR_AXI_SAMPLES];
+
+    /*
+     * AXI top outputs.
+     */
+    static double
+        w_hls_real[MVDR_AXI_N];
+
+    static double
+        w_hls_imag[MVDR_AXI_N];
+
+    /*
+     * Complex vectors used only by the testbench.
+     */
+    static tb_cplx
+        w_hls[MVDR_AXI_N];
+
+    static tb_cplx
+        w_matlab[MVDR_AXI_N];
+
+    static tb_cplx
+        a_s_matlab[MVDR_AXI_N];
+
+    cout << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "AXI-COMPATIBLE MVDR TOP TEST"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    /*
+     * Load the complete 64 x 5000 training matrix
+     * into flattened real and imaginary arrays.
+     */
+    load_flattened_xtrain(
+        "Xtrain_real.csv",
+        "Xtrain_imag.csv",
+
+        Xtrain_real,
+        Xtrain_imag
+    );
+
+    cout << endl;
+
+    /*
+     * Load MATLAB normalized MVDR weights.
+     */
+    load_complex_vector(
+        "w_real.csv",
+        "w_imag.csv",
+
+        w_matlab
+    );
+
+    /*
+     * Load MATLAB target steering vector.
+     *
+     * This is used only for final constraint and
+     * target-gain verification.
+     */
+    load_complex_vector(
+        "a_s_real.csv",
+        "a_s_imag.csv",
+
+        a_s_matlab
+    );
+
+    cout << endl;
+
+    cout
+        << "Running mvdr_top_axi..."
+        << endl;
+
+    /*
+     * Execute the final AXI-compatible top.
+     */
+    mvdr_top_axi(
+        Xtrain_real,
+        Xtrain_imag,
+
+        40.0,   // target azimuth in degrees
+        0.0,    // target elevation in degrees
+        0.5,    // element spacing in wavelengths
+
+        w_hls_real,
+        w_hls_imag
+    );
+
+    /*
+     * Convert split AXI outputs back into complex
+     * values for comparison with MATLAB.
+     */
+CONVERT_OUTPUT_LOOP:
+    for (
+        int i = 0;
+        i < MVDR_AXI_N;
+        i++
+    )
+    {
+        w_hls[i] =
+            tb_cplx(
+                w_hls_real[i],
+                w_hls_imag[i]
+            );
+    }
+
+    /*
+     * Detect NaN or infinity before calculating
+     * any error values.
+     */
+    if (!vector_is_finite(w_hls))
+    {
+        cout << endl;
+
+        cout
+            << "AXI MVDR TOP TEST FAILED"
+            << endl;
+
+        return 1;
+    }
+
+    /*
+     * Compare final HLS weights with MATLAB.
+     */
+    double relative_error =
+        relative_vector_error(
+            w_matlab,
+            w_hls
+        );
+
+    double maximum_error =
+        maximum_element_error(
+            w_matlab,
+            w_hls
+        );
+
+    /*
+     * MVDR distortionless constraint:
+     *
+     * a_s^H * w = 1
+     */
+    tb_cplx distortionless_constraint =
+        hermitian_dot_product(
+            a_s_matlab,
+            w_hls
+        );
+
+    double constraint_error =
+        complex_magnitude(
+            distortionless_constraint -
+            tb_cplx(1.0, 0.0)
+        );
+
+    /*
+     * Target response:
+     *
+     * |w^H * a_s| = 1
+     */
+    tb_cplx target_response =
+        hermitian_dot_product(
+            w_hls,
+            a_s_matlab
+        );
+
+    double target_gain =
+        complex_magnitude(
+            target_response
+        );
+
+    double target_gain_error =
+        std::fabs(
+            target_gain - 1.0
+        );
+
+    cout << endl;
+
+    cout
+        << "===== AXI MVDR RESULTS ====="
+        << endl;
+
+    cout
+        << "Relative weight error = "
+        << relative_error
+        << endl;
+
+    cout
+        << "Maximum element error = "
+        << maximum_error
+        << endl;
+
+    cout
+        << "a_s^H * w_hls         = "
+        << distortionless_constraint
+        << endl;
+
+    cout
+        << "Constraint error      = "
+        << constraint_error
+        << endl;
+
+    cout
+        << "|w_hls^H * a_s|       = "
+        << target_gain
+        << endl;
+
+    cout
+        << "Target gain error     = "
+        << target_gain_error
+        << endl;
+
+    cout << endl;
+
+    cout
+        << "First five final MVDR weights:"
+        << endl;
+
+    for (
+        int i = 0;
+        i < 5;
+        i++
+    )
+    {
+        cout << endl;
+
+        cout
+            << "Weight "
+            << i
+            << endl;
+
+        cout
+            << "MATLAB = "
+            << w_matlab[i]
+            << endl;
+
+        cout
+            << "HLS    = "
+            << w_hls[i]
+            << endl;
+    }
+
+    /*
+     * Initial double-precision tolerance.
+     *
+     * If the result is slightly above 1e-6 but
+     * still very small, inspect the exact value
+     * before changing this tolerance.
+     */
+    const double TOLERANCE =
+        1.0e-6;
+
+    bool passed =
+        std::isfinite(relative_error) &&
+
+        std::isfinite(maximum_error) &&
+
+        std::isfinite(constraint_error) &&
+
+        std::isfinite(target_gain_error) &&
+
+        relative_error <
+            TOLERANCE &&
+
+        maximum_error <
+            TOLERANCE &&
+
+        constraint_error <
+            TOLERANCE &&
+
+        target_gain_error <
+            TOLERANCE;
+
+    cout << endl;
+
+    if (passed)
+    {
+        cout
+            << "======================================"
+            << endl;
+
+        cout
+            << "AXI MVDR TOP TEST PASSED"
+            << endl;
+
+        cout
+            << "======================================"
+            << endl;
+
+        return 0;
+    }
+
+    cout
+        << "======================================"
+        << endl;
+
+    cout
+        << "AXI MVDR TOP TEST FAILED"
+        << endl;
+
+    cout
+        << "======================================"
+        << endl;
+
+    return 1;
+}
+
+
+
+
+
+
+
+Exactly what changed from the old testbench
+Your old testbench contained:
+static cplx Xtrain[N][K];
+static cplx w_hls[N];
+The new version uses:
+static double Xtrain_real[320000];
+static double Xtrain_imag[320000];
+
+static double w_hls_real[64];
+static double w_hls_imag[64];
+The old function call was:
+mvdr_top(
+    Xtrain,
+    40.0,
+    0.0,
+    0.5,
+    w_hls
+);
+It is now:
+mvdr_top_axi(
+    Xtrain_real,
+    Xtrain_imag,
+
+    40.0,
+    0.0,
+    0.5,
+
+    w_hls_real,
+    w_hls_imag
+);
+The split outputs are then reconstructed:
+for (int i = 0; i < MVDR_AXI_N; i++)
+{
+    w_hls[i] =
+        tb_cplx(
+            w_hls_real[i],
+            w_hls_imag[i]
+        );
+}
+Everything after that is the same type of MATLAB comparison you already used.
+Final project file arrangement
+Design files
+Add:
+mvdr_axi_top.cpp
+mvdr_axi_top.h
+
+steering_vec.cpp
+steering_vec.h
+
+qr.cpp
+qr.h
+
+qh_multiply.cpp
+qh_multiply.h
+
+backsub.cpp
+backsub.h
+
+normalize_weights.cpp
+normalize_weights.h
+Do not add:
+mvdr_top.cpp
+mvdr_top.h
+
+covariance.cpp
+covariance.h
+The flattened AXI top already contains its own covariance calculation.
+Testbench files
+Add:
+tb_mvdr_axi_top.cpp
+
+Xtrain_real.csv
+Xtrain_imag.csv
+
+w_real.csv
+w_imag.csv
+
+a_s_real.csv
+a_s_imag.csv
+You do not need:
+a_i1_real.csv
+a_i1_imag.csv
+a_i2_real.csv
+a_i2_imag.csv
+Top function
+Set:
+mvdr_top_axi
