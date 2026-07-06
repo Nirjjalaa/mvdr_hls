@@ -1,0 +1,402 @@
+You’re right. I was explaining it as though you already knew Vivado. We’ll restart from zero.
+
+For tomorrow, do only this much:
+
+Open Vivado
+→ Create a project
+→ Add your packaged MVDR IP
+→ Create an empty block design
+→ Add CIPS
+→ Add your MVDR IP
+→ Stop
+
+Do not connect wires, configure DDR, generate bitstreams, or touch the Address Editor yet.
+
+First understand the Vivado screen
+
+After opening a project, the screen has four main areas:
+
+Left side:
+Flow Navigator
+This contains Create Block Design, Run Synthesis, Settings, etc.
+
+Middle-left:
+Sources
+This shows your block design and files.
+
+Large centre:
+Block Diagram canvas
+This is where the rectangular IP blocks are placed and connected.
+
+Bottom:
+Messages / Tcl Console / Log
+Errors and warnings appear here.
+
+Think of a block design like drawing a circuit using ready-made rectangular blocks.
+
+
+---
+
+Step 1: Open Vivado
+
+On Linux, open a terminal and type:
+
+vivado
+
+Or open Vivado 2024.2 from the application menu.
+
+You should see the Vivado welcome page.
+
+Click:
+
+Create Project
+
+Then click:
+
+Next
+
+The official Vivado project flow begins through Create Project on the Quick Start screen. 
+
+
+---
+
+Step 2: Give the project a name
+
+In Project Name, enter:
+
+mvdr_versal
+
+For location, choose a simple local folder, for example:
+
+/home/your_username/mvdr_vivado
+
+Keep this checked:
+
+Create project subdirectory
+
+Click:
+
+Next
+
+Avoid spaces in the project name and path.
+
+
+---
+
+Step 3: Select the project type
+
+Choose:
+
+RTL Project
+
+Tick:
+
+Do not specify sources at this time
+
+Click:
+
+Next
+
+You do not need to add Verilog or VHDL files because your HLS design is already packaged as an IP. AMD’s standard new-project instructions also use an RTL project with no sources specified initially. 
+
+
+---
+
+Step 4: Select the board or FPGA part
+
+You may see two tabs:
+
+Boards
+Parts
+
+Preferred option: Boards
+
+Open the Boards tab and search:
+
+VCK190
+
+Choose something similar to:
+
+Versal VCK190 Evaluation Platform
+
+or:
+
+VCK190 Production Board
+
+Click it once so it becomes highlighted.
+
+When VCK190 is not listed
+
+Open the Parts tab and search:
+
+xcvc1902-vsva2197-2MP-e-S
+
+Select that exact device.
+
+The VCK190 uses the xcvc1902-vsva2197-2MP-e-S device, and AMD’s VCK190 project examples use either the board selection or that exact part. 
+
+Click:
+
+Next
+
+Review the summary and click:
+
+Finish
+
+Vivado will now open the actual project screen.
+
+
+---
+
+Step 5: Add your packaged HLS IP
+
+Before doing this, ensure you have completed Package/Export RTL as Vivado IP in Vitis HLS.
+
+When HLS gives you a ZIP file, extract it first.
+
+Inside the extracted IP folder, there should normally be a file named:
+
+component.xml
+
+Do not select component.xml itself. You select the folder containing the packaged IP.
+
+In Vivado, look at the left-side Flow Navigator.
+
+Click:
+
+Project Manager
+→ Settings
+
+A settings window will open.
+
+On its left side, expand:
+
+IP
+
+Then select:
+
+Repository
+
+Click:
+
++ Add
+
+or:
+
+Add Repository
+
+Browse to the folder containing your packaged MVDR IP.
+
+For example:
+
+/home/your_username/mvdr_ip/
+
+Select the folder and click:
+
+Select
+
+Your MVDR IP should appear in the repository list.
+
+Click:
+
+Apply
+
+Then:
+
+OK
+
+Vivado 2024.2 adds custom packaged IP through Project Settings → IP → Repository → Add Repository. 
+
+
+---
+
+Step 6: Check whether Vivado can see the IP
+
+In the left-side Flow Navigator, click:
+
+IP Catalog
+
+A new tab will open.
+
+Use the search box and type:
+
+mvdr
+
+Look for a name such as:
+
+mvdr_top_axi
+
+or the display name you entered while packaging it.
+
+Do not double-click it here yet. This step is only to confirm that Vivado recognizes the IP.
+
+If it appears, your repository was added correctly.
+
+Custom packaged IP appears in the Vivado IP Catalog after its repository is added. 
+
+
+---
+
+Step 7: Create the block design
+
+Look again at the left-side Flow Navigator.
+
+Find:
+
+IP Integrator
+
+Under it, click:
+
+Create Block Design
+
+A small window will open.
+
+Enter:
+
+Design name: system
+Directory: <Local to Project>
+
+Keep the source set as:
+
+Design Sources
+
+Click:
+
+OK
+
+Vivado will open a large blank white canvas. That is your block-design workspace. The official IP Integrator flow uses Flow Navigator → Create Block Design to open this canvas. 
+
+
+---
+
+Step 8: Add the Versal processor block
+
+At the top of the white canvas, find the small:
+
++
+
+button.
+
+Hovering over it should show:
+
+Add IP
+
+Click it.
+
+A search box will appear.
+
+Search:
+
+CIPS
+
+Choose:
+
+Control, Interfaces & Processing System
+
+It may appear as:
+
+Versal CIPS
+
+Double-click it.
+
+A large rectangular block named something like this should appear:
+
+versal_cips_0
+
+CIPS is the Versal processing-system block and is used to configure the processor, clocks, peripherals and PS–PL interfaces. 
+
+
+---
+
+Step 9: Run Block Automation
+
+After adding CIPS, a green or blue message bar may appear at the top of the canvas saying:
+
+Designer Assistance available
+
+Click:
+
+Run Block Automation
+
+A configuration window will appear.
+
+When you selected the VCK190 board earlier, Vivado may offer a board preset.
+
+For the first attempt:
+
+Keep the available board preset selected.
+
+Keep most options at their defaults.
+
+Click OK.
+
+
+Do not manually change all the CIPS pages yet.
+
+AMD’s Versal tutorial adds CIPS and then uses Run Block Automation for the initial processor-system configuration. 
+
+
+---
+
+Step 10: Add your MVDR IP to the canvas
+
+Click the canvas + button again:
+
+Add IP
+
+Search:
+
+mvdr
+
+Double-click your packaged IP:
+
+mvdr_top_axi
+
+A second rectangular block should appear.
+
+Your canvas should now contain at least:
+
+┌──────────────────┐
+│  versal_cips_0   │
+└──────────────────┘
+
+┌──────────────────┐
+│  mvdr_top_axi_0  │
+└──────────────────┘
+
+Do not draw any wires yet.
+
+
+---
+
+Stop at this point
+
+Tomorrow’s correct stopping point is:
+
+Vivado project created             ✅
+Correct VCK190/Versal part chosen  ✅
+MVDR IP repository added           ✅
+Block design created               ✅
+Versal CIPS added                  ✅
+Block Automation completed         ✅
+MVDR IP added to the canvas        ✅
+
+Do not yet click:
+
+Run Connection Automation
+Validate Design
+Generate Output Products
+Run Synthesis
+Generate Device Image
+
+The next connection steps depend on the exact port names visible on your CIPS and MVDR blocks. Your IP is expected to show ports such as:
+
+s_axi_control
+m_axi_gmem
+ap_clk
+ap_rst_n
+interrupt
+
+But we should work from the ports Vivado actually displays, not guess.
+
+Tomorrow, share one clear full-screen screenshot after both versal_cips_0 and mvdr_top_axi_0 are visible. Then the connections can be explained wire by wire, including exactly where to click.
