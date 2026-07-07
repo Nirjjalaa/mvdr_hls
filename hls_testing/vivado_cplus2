@@ -1,0 +1,756 @@
+Yes. From your screenshot, the **MVDR IP is added correctly**, but the CIPS block is not yet configured for PL connections—it currently exposes only `gem0_tsu_timer_cnt`.
+
+Do **not draw any wires yet**. First configure CIPS.
+
+## Step 1 — Open CIPS configuration
+
+Double-click this block:
+
+```text
+versal_cips_0
+```
+
+A large configuration window will open.
+
+## Step 2 — Enable the processor-to-MVDR control interface
+
+Inside the CIPS window:
+
+1. Select **PS-PMC**.
+2. In the left-side menu, select **PS-PL Interfaces**.
+3. Find and enable:
+
+```text
+M_AXI_FPD
+```
+
+4. Find:
+
+```text
+Number of PL Resets
+```
+
+Set it to:
+
+```text
+1
+```
+
+`M_AXI_FPD` is the interface the Arm processor will use to access the MVDR IP’s `s_axi_control` registers. AMD’s Versal flow similarly enables `M_AXI_FPD` and one PL reset before connecting programmable-logic peripherals. ([AMD Documentation][1])
+
+## Step 3 — Enable the 100 MHz PL clock
+
+Still inside the CIPS configuration:
+
+1. Click **Clocking**.
+2. Open **Output Clocks**.
+3. Expand:
+
+```text
+PMC Domain Clocks
+    → PL Fabric Clocks
+```
+
+4. Enable:
+
+```text
+PL0_REF_CLK
+```
+
+5. Set its frequency to:
+
+```text
+100 MHz
+```
+
+Use 100 MHz because your HLS IP was synthesized with:
+
+```text
+10 ns clock period = 100 MHz
+```
+
+AMD’s documented CIPS flow enables `PL0_REF_CLK` through **Clocking → Output Clocks → PL Fabric Clocks**. ([AMD Documentation][1])
+
+## Step 4 — Close the configuration
+
+Click:
+
+```text
+OK
+```
+
+and then:
+
+```text
+Finish
+```
+
+Wait for Vivado to update the block design.
+
+## What should appear afterward
+
+The CIPS block should now show ports similar to:
+
+```text
+M_AXI_FPD
+pl0_ref_clk
+pl_resetn0
+```
+
+The exact reset name might appear as:
+
+```text
+pl_resetn
+pl_resetn0
+```
+
+Both are normal depending on the configuration.
+
+Press:
+
+```text
+Ctrl + S
+```
+
+to save.
+
+## Stop there temporarily
+
+Do not yet connect:
+
+```text
+s_axi_control
+m_axi_gmem
+ap_clk
+ap_rst_n
+```
+
+The next step is to add:
+
+```text
+AXI NoC
+```
+
+because `m_axi_gmem` must reach DDR through the Versal NoC. The NoC configuration depends on whether this project was created using the **VCK190 board preset** or only the raw VC1902 device part. ([AMD Documentation][2])
+
+After finishing the CIPS settings, send a screenshot showing its newly visible ports.
+  
+
+[1]: https://docs.amd.com/r/2024.2-English/ug1305-versal-embedded-tutorial/System-Design-Example-using-Scalar-Engine-and-Adaptable-Engine?contentId=Jr9tcT3mPknv5FrOp0ICNw&utm_source=chatgpt.com "System Design Example using Scalar Engine and ..."
+[2]: https://docs.amd.com/r/2024.2-English/ug1305-versal-embedded-tutorial/Versal-CIPS-and-NoC-DDR-IP-Core-Configuration?contentId=Sfib2mop1AXh66hDT9YnJQ&utm_source=chatgpt.com "Versal CIPS and NoC (DDR) IP Core Configuration"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Yes. Follow these steps from your current screen. **Stop after “Validate Design” succeeds** and show me the final diagram before running Vivado synthesis.
+
+## Final diagram we are trying to create
+
+```text
+PROCESSOR CONTROL PATH
+
+versal_cips_0/M_AXI_FPD
+          ↓
+    SmartConnect
+          ↓
+mvdr_top_axi_0/s_axi_control
+
+
+TRAINING-DATA PATH
+
+mvdr_top_axi_0/m_axi_gmem
+          ↓
+       AXI NoC
+          ↓
+      Board DDR
+
+
+CLOCK AND RESET
+
+CIPS pl0_ref_clk ─────────→ MVDR ap_clk
+
+CIPS pl_resetn
+      ↓
+Processor System Reset
+      ↓ peripheral_aresetn
+MVDR ap_rst_n
+```
+
+The AXI NoC provides the path between programmable-logic masters such as your MVDR accelerator and DDR memory. ([AMD Documentation][1])
+
+# Part 1 — Configure the CIPS block
+
+## Step 1: Open CIPS
+
+Double-click:
+
+```text
+versal_cips_0
+```
+
+Wait for the large configuration window to open.
+
+## Step 2: Enable the processor control interface
+
+Find:
+
+```text
+PS-PMC
+→ PS-PL Interfaces
+```
+
+Enable:
+
+```text
+M_AXI_FPD
+```
+
+This is the processor-side AXI master that will control your MVDR IP.
+
+## Step 3: Enable the NoC interfaces
+
+Still inside:
+
+```text
+PS-PMC
+```
+
+open:
+
+```text
+NoC
+```
+
+Enable the options resembling:
+
+```text
+PS to NoC Non-Coherent Interface 0
+PS to NoC Non-Coherent Interface 1
+```
+
+The precise names might appear as:
+
+```text
+NOC_NCI_0
+NOC_NCI_1
+```
+
+These allow the processor system to access DDR through the NoC.
+
+## Step 4: Enable a PL clock
+
+Open:
+
+```text
+Clocking
+→ Output Clocks
+→ PMC Domain Clocks
+→ PL Fabric Clocks
+```
+
+Enable:
+
+```text
+PL0_REF_CLK
+```
+
+Set it to:
+
+```text
+100 MHz
+```
+
+Your HLS design used a 10 ns clock, which corresponds to 100 MHz.
+
+## Step 5: Enable one reset
+
+Find the PL reset setting and set:
+
+```text
+Number of PL Resets = 1
+```
+
+Then click:
+
+```text
+OK
+→ Finish
+```
+
+Wait for Vivado to update the diagram.
+
+You should now see ports resembling:
+
+```text
+M_AXI_FPD
+pl0_ref_clk
+pl_resetn
+```
+
+on the CIPS block.
+
+Press:
+
+```text
+Ctrl + S
+```
+
+# Part 2 — Add the AXI NoC and DDR
+
+## Step 6: Add AXI NoC
+
+On the block-design toolbar, click:
+
+```text
++
+```
+
+Search:
+
+```text
+AXI NoC
+```
+
+Double-click:
+
+```text
+AXI NoC
+```
+
+A block named approximately:
+
+```text
+axi_noc_0
+```
+
+will appear.
+
+## Step 7: Run Block Automation
+
+A message should appear:
+
+```text
+Designer Assistance available
+```
+
+Click:
+
+```text
+Run Block Automation
+```
+
+A window will open.
+
+### When the project uses the VCK190 board
+
+Look for an option related to:
+
+```text
+DDR4 SDRAM
+Board DDR
+VCK190 DDR4
+```
+
+Select the board DDR interface and leave the other settings at their defaults.
+
+Click:
+
+```text
+OK
+```
+
+Vivado should configure the NoC DDR controller and add DDR external-interface pins automatically. AMD’s Versal workflow similarly adds AXI NoC and uses Block Automation to configure the DDR path. ([AMD Documentation][2])
+
+### Important
+
+When **no DDR4 board option appears**, do not select random DDR parameters. That usually means the Vivado project was created using only the raw FPGA part rather than the VCK190 board preset.
+
+In that situation, stop at this step and show the NoC automation window.
+
+# Part 3 — Connect the processor to MVDR control
+
+## Step 8: Run Connection Automation
+
+At the top of the block diagram, click:
+
+```text
+Run Connection Automation
+```
+
+A list of unconnected interfaces appears.
+
+Find and tick:
+
+```text
+mvdr_top_axi_0/s_axi_control
+```
+
+Vivado should offer:
+
+```text
+Master interface:
+versal_cips_0/M_AXI_FPD
+```
+
+Select that.
+
+For clock, select:
+
+```text
+versal_cips_0/pl0_ref_clk
+```
+
+Allow Vivado to add:
+
+```text
+AXI SmartConnect
+Processor System Reset
+```
+
+Click:
+
+```text
+OK
+```
+
+Vivado should automatically create:
+
+```text
+versal_cips_0
+      ↓
+axi_smc or smartconnect
+      ↓
+mvdr_top_axi_0/s_axi_control
+```
+
+Connection Automation commonly adds SmartConnect, reset logic, and clock connections between CIPS and AXI peripherals. ([AMD Documentation][3])
+
+# Part 4 — Connect MVDR to DDR
+
+## Step 9: Run Connection Automation again
+
+Click:
+
+```text
+Run Connection Automation
+```
+
+Look for:
+
+```text
+mvdr_top_axi_0/m_axi_gmem
+```
+
+Tick it.
+
+Vivado may offer a free AXI NoC slave port such as:
+
+```text
+axi_noc_0/S00_AXI
+```
+
+or:
+
+```text
+axi_noc_0/S02_AXI
+axi_noc_0/S06_AXI
+```
+
+The number is not important. Select whichever AXI NoC slave port Vivado offers.
+
+Choose the clock:
+
+```text
+versal_cips_0/pl0_ref_clk
+```
+
+Click:
+
+```text
+OK
+```
+
+The resulting connection should be:
+
+```text
+mvdr_top_axi_0/m_axi_gmem
+                ↓
+         axi_noc_0/Sxx_AXI
+                ↓
+               DDR
+```
+
+## When `m_axi_gmem` is not listed in automation
+
+Try this:
+
+1. Double-click `axi_noc_0`.
+2. Open the **General** tab.
+3. Find:
+
+```text
+Number of AXI Slave Interfaces
+```
+
+4. Increase it by one.
+5. Find:
+
+```text
+Number of AXI Clocks
+```
+
+6. Make sure at least one programmable-logic AXI clock is available.
+7. Click **OK**.
+8. Run Connection Automation again.
+
+Do not manually configure DDR timing values.
+
+# Part 5 — Check clock connections
+
+## Step 10: Check `ap_clk`
+
+Look at the left side of:
+
+```text
+mvdr_top_axi_0
+```
+
+The port:
+
+```text
+ap_clk
+```
+
+must be connected to:
+
+```text
+versal_cips_0/pl0_ref_clk
+```
+
+If it is still unconnected:
+
+1. Move the cursor onto the `pl0_ref_clk` pin.
+2. Click and hold.
+3. Drag the wire to `mvdr_top_axi_0/ap_clk`.
+4. Release.
+
+The SmartConnect and NoC programmable-logic AXI clock ports should also use the same 100 MHz clock unless automation selected a valid clock converter.
+
+# Part 6 — Check reset connections
+
+## Step 11: Find Processor System Reset
+
+Automation should have added a block named something similar to:
+
+```text
+proc_sys_reset_0
+```
+
+Its important ports are:
+
+```text
+slowest_sync_clk
+ext_reset_in
+peripheral_aresetn
+interconnect_aresetn
+```
+
+Expected connections:
+
+```text
+versal_cips_0/pl0_ref_clk
+       ↓
+proc_sys_reset_0/slowest_sync_clk
+```
+
+```text
+versal_cips_0/pl_resetn
+       ↓
+proc_sys_reset_0/ext_reset_in
+```
+
+```text
+proc_sys_reset_0/peripheral_aresetn
+       ↓
+mvdr_top_axi_0/ap_rst_n
+```
+
+The `ap_rst_n` input requires an **active-low reset**, so `peripheral_aresetn` is appropriate.
+
+If `ap_rst_n` remains unconnected, manually drag:
+
+```text
+proc_sys_reset_0/peripheral_aresetn
+```
+
+to:
+
+```text
+mvdr_top_axi_0/ap_rst_n
+```
+
+# Part 7 — Interrupt
+
+Your MVDR block has:
+
+```text
+interrupt
+```
+
+Leave it unconnected for now.
+
+The software can check the `AP_DONE` bit repeatedly instead of using an interrupt. An unconnected interrupt may produce a warning but should not stop validation.
+
+# Part 8 — Assign addresses
+
+## Step 12: Open Address Editor
+
+You already have an **Address Editor** tab near the top.
+
+Click:
+
+```text
+Address Editor
+```
+
+Look for unassigned entries.
+
+Then click:
+
+```text
+Assign All
+```
+
+If Vivado asks:
+
+```text
+Automatically assign addresses?
+```
+
+choose:
+
+```text
+Yes
+```
+
+You need two kinds of mappings:
+
+### Processor control mapping
+
+Something similar to:
+
+```text
+versal_cips_0/M_AXI_FPD
+→ mvdr_top_axi_0/s_axi_control
+```
+
+This provides the address used to start and control the accelerator.
+
+### MVDR DDR mapping
+
+Something similar to:
+
+```text
+mvdr_top_axi_0/m_axi_gmem
+→ DDR address segment
+```
+
+This allows the MVDR IP to read `Xtrain_real`, read `Xtrain_imag`, and write the weight arrays.
+
+In IP Integrator, these master-to-slave mappings form address paths. ([AMD Documentation][4])
+
+# Part 9 — Arrange and validate the diagram
+
+## Step 13: Regenerate the layout
+
+Return to the **Diagram** tab.
+
+Click the toolbar button resembling:
+
+```text
+Regenerate Layout
+```
+
+It normally looks like connected blocks or rearranging arrows.
+
+This will organize the diagram automatically.
+
+## Step 14: Validate Design
+
+Press:
+
+```text
+F6
+```
+
+or right-click empty white space and choose:
+
+```text
+Validate Design
+```
+
+If Vivado asks to assign missing addresses, click:
+
+```text
+Yes
+```
+
+AMD’s documented flow uses Validate Design and permits Vivado to assign address segments during validation. ([AMD Documentation][2])
+
+## Successful result
+
+You want:
+
+```text
+Validation successful
+```
+
+or:
+
+```text
+Validation completed successfully
+```
+
+Warnings about the unused `interrupt` port are acceptable for now.
+
+Errors about these are not acceptable:
+
+```text
+Unconnected clock
+Unconnected reset
+Unassigned address
+No DDR connectivity
+Incompatible AXI interface
+```
+
+# What to show me in the evening
+
+Send these three screenshots:
+
+1. **The complete block diagram** with all blocks and wires visible.
+2. **The validation result window**.
+3. **The Address Editor** showing both the MVDR control address and DDR mapping.
+
+Do not run **Generate Device Image**, implementation, or bitstream generation until the validated connections are checked.
+
+[1]: https://docs.amd.com/r/en-US/ug1305-versal-embedded-tutorial/Versal-CIPS-and-NoC-DDR-IP-Core-Configuration "Versal CIPS and NoC (DDR) IP Core Configuration - Versal CIPS and NoC (DDR) IP Core Configuration - 2025.1 English - UG1305"
+[2]: https://docs.amd.com/r/2023.2-English/ug1305-versal-embedded-tutorial/Versal-CIPS-and-NoC-DDR-IP-Core-Configuration "Versal CIPS and NoC (DDR) IP Core Configuration - Versal CIPS and NoC (DDR) IP Core Configuration - 2023.2 English - UG1305"
+[3]: https://docs.amd.com/r/2024.2-English/ug1305-versal-embedded-tutorial/System-Design-Example-using-Scalar-Engine-and-Adaptable-Engine?contentId=Jr9tcT3mPknv5FrOp0ICNw "System Design Example using Scalar Engine and Adaptable Engine - System Design Example using Scalar Engine and Adaptable Engine - 2024.2 English - UG1305"
+[4]: https://docs.amd.com/r/2023.2-English/ug994-vivado-ip-subsystems/Addressing-Structure?utm_source=chatgpt.com "Addressing Structure - 2023.2 English - UG994"
