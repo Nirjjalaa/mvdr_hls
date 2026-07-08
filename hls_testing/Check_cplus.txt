@@ -1,0 +1,233 @@
+What you saw is not automatically suspicious. When you choose Run Connection Automation for all, Vivado can add several helper blocks, so seeing around seven blocks is normal. Typical blocks are:
+
+versal_cips_0
+axi_noc_0
+mvdr_top_axi_0
+SmartConnect
+Processor System Reset
+Clock/reset helper blocks
+DDR-related NoC blocks
+
+Also, Connection Automation usually shows only interfaces that are still unconnected. Therefore, if mvdr_top_axi_0/m_axi_gmem did not appear during the second run, it may already have been connected during the first “connect all” operation. Designer Assistance is specifically intended to add these internal interface, clock, and reset connections automatically. 
+
+But F6 validation alone does not prove that m_axi_gmem reaches DDR. It only proves that Vivado found no structural validation errors. We need verify the data path.
+
+What to check next time
+
+1. Open the block diagram
+
+Open:
+
+Sources
+→ Design Sources
+→ system.bd
+
+Click the Regenerate Layout button so the blocks become easier to inspect.
+
+2. Find mvdr_top_axi_0
+
+Your MVDR block should have:
+
+Left side:
+s_axi_control
+ap_clk
+ap_rst_n
+
+Right side:
+m_axi_gmem
+interrupt
+
+Look specifically at:
+
+m_axi_gmem
+
+Correct situation
+
+There should be a thick AXI interface line going from:
+
+mvdr_top_axi_0/m_axi_gmem
+
+to either:
+
+axi_noc_0/Sxx_AXI
+
+or first through:
+
+SmartConnect
+
+and then to:
+
+axi_noc_0
+
+Both arrangements are valid:
+
+MVDR m_axi_gmem → AXI NoC → DDR
+
+or:
+
+MVDR m_axi_gmem → SmartConnect → AXI NoC → DDR
+
+The AXI NoC is required for programmable-logic masters to communicate with Versal’s integrated DDR controller. 
+
+Wrong situation
+
+If m_axi_gmem goes to a small external interface symbol at the edge of the canvas, labelled something like:
+
+m_axi_gmem_0
+
+then Vivado made it an external port instead of connecting it to DDR. Validation can still succeed in that situation, but your MVDR IP will not access the board DDR as intended.
+
+3. Use the Address Editor—the most important test
+
+Click the Address Editor tab.
+
+You should find two separate mappings.
+
+Control mapping
+
+Something similar to:
+
+versal_cips_0/M_AXI_FPD
+    → mvdr_top_axi_0/s_axi_control
+
+This lets the processor start the accelerator and write the input/output addresses.
+
+DDR mapping
+
+Expand the master associated with:
+
+mvdr_top_axi_0/m_axi_gmem
+
+Under it, you should see an assigned DDR segment with a name resembling:
+
+DDR
+DDR_LOW0
+DDR_CH0
+axi_noc_0/DDR
+
+The exact name varies.
+
+The essential requirement is:
+
+MVDR m_axi_gmem
+    → assigned DDR address range
+
+If this DDR segment exists, your data connection is most likely correct.
+
+If the MVDR master is absent from the Address Editor, or its status says:
+
+Unassigned
+Excluded
+
+then the DDR path is not complete.
+
+About the clock option showing nothing
+
+When Connection Automation showed Clock but no choices, the most likely reasons are:
+
+1. The MVDR clock was already connected.
+
+
+2. Vivado had already selected the CIPS PL clock.
+
+
+3. The clock was propagated through a SmartConnect/NoC block automatically.
+
+
+4. There was no additional unconnected compatible clock to offer.
+
+
+
+Check the actual pin:
+
+mvdr_top_axi_0/ap_clk
+
+It must have a thin wire connected to a clock source, usually:
+
+versal_cips_0/pl0_ref_clk
+
+possibly through a clocking block.
+
+Also check:
+
+mvdr_top_axi_0/ap_rst_n
+
+It should connect to an active-low reset, usually:
+
+proc_sys_reset/peripheral_aresetn
+
+If both have wires and F6 validation passed, do not rerun clock automation.
+
+If m_axi_gmem is genuinely unconnected
+
+Only then do this:
+
+1. Double-click axi_noc_0.
+
+
+2. In General, ensure there is at least one free AXI Slave Interface.
+
+
+3. Click OK.
+
+
+4. Return to the diagram.
+
+
+5. Drag from:
+
+
+
+mvdr_top_axi_0/m_axi_gmem
+
+to the free:
+
+axi_noc_0/Sxx_AXI
+
+6. Run Connection Automation only for the associated NoC clock.
+
+
+7. Open Address Editor and click Assign All.
+
+
+8. Run F6 validation again.
+
+
+
+Do not alter the DDR timing or board-memory parameters manually.
+
+Why there were many blocks
+
+The extra blocks are expected because one simple logical connection:
+
+Processor → MVDR control
+
+may require:
+
+CIPS
+SmartConnect
+clock
+reset synchronizer
+
+and the data route:
+
+MVDR → DDR
+
+requires the Versal NoC and DDR controller. Vivado IP Integrator builds systems from multiple interconnected IP blocks, and automation can create supporting infrastructure automatically. 
+
+Current conclusion
+
+Your situation is encouraging:
+
+Run Connection Automation completed
+F6 Validate Design completed successfully
+No validation errors
+
+Do not rebuild it. Next time, verify only these four items:
+
+1. s_axi_control has a thick AXI connection
+2. m_axi_gmem has a thick AXI connection to NoC/DDR
+3. ap_clk has a clock wire
+4. ap_rst_n has an active-low reset wire
+
+Then check the Address Editor for the MVDR DDR segment. The complete block-diagram and Address Editor screenshots will tell us whether the automation made the correct design.
