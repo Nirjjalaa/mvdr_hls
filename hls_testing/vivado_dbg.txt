@@ -1,0 +1,809 @@
+No problem — now I understand exactly what happened.
+
+You did **not ruin the design**. You accidentally added debug blocks because you clicked **Debug** on the connection. That option does **not fix** the connection; it inserts **ILA blocks** to observe signals.
+
+## What happened
+
+### Your manual connection
+
+You did this:
+
+```text
+mvdr_top_axi_0/m_axi_gmem  →  axi_noc_0/S06_AXI
+```
+
+That part is correct.
+
+### But increasing S interfaces from 6 to 7 is not enough
+
+When you added `S06_AXI`, Vivado created a new NoC input port, but it did **not automatically decide where that port should go inside DDR**.
+
+So Vivado is saying:
+
+```text
+S06_AXI is physically connected,
+but its memory destination is not assigned.
+```
+
+That is why this warning came:
+
+```text
+Incomplete address path from
+/mvdr_top_axi_0/Data_m_axi_gmem
+to
+/axi_noc_0/S06_AXI
+```
+
+### The ILA blocks
+
+When you right-clicked and selected **Debug**, Vivado inserted ILA blocks.
+
+That is why these appeared:
+
+```text
+axis_ila_0
+axis_ila_1
+```
+
+They are not needed for your first working design.
+
+## Are your diagram connections correct?
+
+Yes, the **main shape is correct**:
+
+```text
+CIPS → AXI SmartConnect → mvdr_top_axi_0/s_axi_control   ✅
+mvdr_top_axi_0/m_axi_gmem → AXI NoC S06_AXI              ✅
+clock/reset connected                                      ✅
+```
+
+But this part is still incomplete:
+
+```text
+AXI NoC S06_AXI → DDR memory controller                  ❌
+```
+
+So don’t delete everything. Just fix `S06_AXI`.
+
+---
+
+# What I recommend with only 7 days left
+
+Do **not** use ILA now. Remove the ILA blocks unless your guide specifically wants them.
+
+ILA is useful for debugging real hardware signals, but it adds complexity. For your first success, keep the block design simple.
+
+## Step 1: Save a backup first
+
+In Vivado:
+
+```text
+File → Save Project As
+```
+
+Save it as:
+
+```text
+versal_mvdr_backup_with_ila
+```
+
+Then continue working on the original or a copy.
+
+---
+
+# Step 2: Remove the ILA blocks
+
+In the block diagram:
+
+1. Click `axis_ila_0`
+2. Press **Delete**
+3. Click `axis_ila_1`
+4. Press **Delete**
+
+If Vivado asks whether to delete connected nets, choose yes only for the ILA-related wires.
+
+Do **not** delete:
+
+```text
+versal_cips_0
+axi_noc_0
+axi_smc
+mvdr_top_axi_0
+rst block
+clocking block
+```
+
+After deleting ILA blocks, make sure these still exist:
+
+```text
+mvdr_top_axi_0/m_axi_gmem → axi_noc_0/S06_AXI
+mvdr_top_axi_0/s_axi_control → axi_smc
+mvdr_top_axi_0/ap_clk → clock
+mvdr_top_axi_0/ap_rst_n → reset
+```
+
+---
+
+# Step 3: Fix the actual problem — S06_AXI destination
+
+Double-click:
+
+```text
+axi_noc_0
+```
+
+Find the table where it shows:
+
+```text
+S00_AXI
+S01_AXI
+S02_AXI
+...
+S06_AXI
+```
+
+For `S06_AXI`, there will be a connection/destination setting.
+
+Right now it is empty.
+
+Set `S06_AXI` to connect to one DDR memory controller, usually:
+
+```text
+MC_0
+```
+
+or a DDR option like:
+
+```text
+C0_DDR_LOW0
+DDR_LOW0
+MC_0
+```
+
+Use simple values if asked:
+
+```text
+read_bw = 100
+write_bw = 100
+read_avg_burst = 4
+write_avg_burst = 4
+```
+
+Then click:
+
+```text
+Apply → OK
+```
+
+---
+
+# Step 4: If GUI is confusing, use Tcl
+
+In Vivado Tcl Console, paste:
+
+```tcl
+set_property -dict [list CONFIG.CONNECTIONS {MC_0 {read_bw {100} write_bw {100} read_avg_burst {4} write_avg_burst {4}}}] [get_bd_intf_pins /axi_noc_0/S06_AXI]
+
+assign_bd_address
+
+validate_bd_design
+```
+
+If Vivado says `MC_0` is invalid, then try:
+
+```tcl
+set_property -dict [list CONFIG.CONNECTIONS {MC_1 {read_bw {100} write_bw {100} read_avg_burst {4} write_avg_burst {4}}}] [get_bd_intf_pins /axi_noc_0/S06_AXI]
+
+assign_bd_address
+
+validate_bd_design
+```
+
+Try `MC_2` or `MC_3` only if `MC_0` and `MC_1` are rejected.
+
+---
+
+# Step 5: What warning must disappear?
+
+This one must disappear:
+
+```text
+Incomplete address path from
+/mvdr_top_axi_0/Data_m_axi_gmem
+to
+/axi_noc_0/S06_AXI
+```
+
+That is the main important one.
+
+These are less urgent:
+
+```text
+SmartConnect low-area mode warning
+RUSER_WIDTH / WUSER_WIDTH mismatch
+Debug net warning
+```
+
+With 7 days left, do not waste time chasing all minor warnings.
+
+---
+
+# Your safest next target
+
+Today/tomorrow your only goal is:
+
+```text
+1. Remove ILA blocks
+2. Keep m_axi_gmem connected to S06_AXI
+3. Configure S06_AXI to DDR/MC_0
+4. Assign address
+5. Validate design
+```
+
+After that, continue with:
+
+```text
+Generate Output Products
+Create HDL Wrapper
+Run Synthesis
+Run Implementation
+Generate Device Image
+Export XSA
+```
+
+You are not stuck in the algorithm anymore. Your HLS design is already working. This is now just a **NoC DDR routing fix**.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Yes — **the visible wiring in the diagram is mostly correct**.
+
+Your diagram has the two essential connections:
+
+```text id="dfsvcc"
+CIPS → AXI SmartConnect → mvdr_top_axi_0/s_axi_control
+```
+
+This is correct for **starting and controlling** your MVDR IP.
+
+```text id="pw02a8"
+mvdr_top_axi_0/m_axi_gmem → AXI NoC → DDR4
+```
+
+This is also the correct idea for **reading Xtrain from DDR and writing weights back to DDR**.
+
+But your design is **not fully complete yet** because Vivado says:
+
+```text id="jjk4j9"
+Incomplete address path from
+/mvdr_top_axi_0/Data_m_axi_gmem
+to
+/axi_noc_0/S06_AXI
+```
+
+Your log also shows that `S06_AXI` was connected to your MVDR IP, but its NoC destination was left empty:
+
+```text id="nsdjws"
+CONFIG.CONNECTIONS {}
+```
+
+So the **wire is drawn**, but the **NoC routing/address path to DDR is not assigned yet**. 
+
+## So the answer is:
+
+```text id="uqv93u"
+Diagram connection shape: correct ✅
+Address mapping/routing: incomplete ❌
+```
+
+Do **not** restart. Do **not** rebuild from zero. Fix only the `S06_AXI` NoC connection.
+
+# Fast fix
+
+In Vivado Tcl Console, try this:
+
+```tcl id="phxg0j"
+set_property -dict [list CONFIG.CONNECTIONS {MC_0 {read_bw {100} write_bw {100} read_avg_burst {4} write_avg_burst {4}}}] [get_bd_intf_pins /axi_noc_0/S06_AXI]
+
+assign_bd_address
+
+validate_bd_design
+```
+
+If `MC_0` gives an error, use the same DDR target already shown in your NoC GUI, like `MC_1`, `MC_2`, or `MC_3`.
+
+After this, the warning for this should disappear:
+
+```text id="shqzj8"
+Incomplete address path from /mvdr_top_axi_0/Data_m_axi_gmem
+```
+
+That is the **main warning you must fix**.
+
+## Warnings you can ignore for now
+
+These are not your priority:
+
+```text id="uhjclo"
+SmartConnect low-area mode warning
+Debug / ILA warning
+RUSER_WIDTH / WUSER_WIDTH mismatch
+```
+
+They are not the reason your MVDR memory path is incomplete.
+
+## About the ILA blocks
+
+The ILA blocks are optional. They are not wrong, but for your first successful project, they are not necessary.
+
+With only 7 days left:
+
+```text id="53km6i"
+If implementation is slow or fails → remove ILA blocks
+If implementation runs fine → keep them
+```
+
+## Your next action
+
+Do this only:
+
+```text id="misg53"
+1. Fix S06_AXI connection to DDR / MC_0
+2. assign_bd_address
+3. validate_bd_design
+4. Check that MVDR incomplete address warning disappears
+```
+
+Once validation is clean enough, continue:
+
+```text id="wb5qjo"
+Generate Output Products
+Create HDL Wrapper
+Run Synthesis
+Run Implementation
+Generate Device Image / Bitstream
+Export XSA
+```
+
+You are not far. The algorithm and HLS IP are already done. The current issue is only **NoC address routing**, not MVDR code.
+
+
+
+
+
+
+
+
+
+
+
+
+
+Keep **7 interfaces**. Do **not** make it 6 again.
+
+Because your MVDR IP needs one extra NoC input:
+
+```text id="e9a589"
+mvdr_top_axi_0/m_axi_gmem → axi_noc_0/S06_AXI
+```
+
+So if you reduce back to 6, your MVDR memory port will again have nowhere to connect.
+
+## Where to connect the 7th clock
+
+The 7th clock is:
+
+```text id="v9ri4h"
+axi_noc_0/aclk6
+```
+
+It belongs to:
+
+```text id="3wlm7v"
+axi_noc_0/S06_AXI
+```
+
+So connect:
+
+```text id="orv9iy"
+axi_noc_0/aclk6 → versal_cips_0/pl0_ref_clk
+```
+
+Also your MVDR IP clock should be:
+
+```text id="85u9wd"
+mvdr_top_axi_0/ap_clk → versal_cips_0/pl0_ref_clk
+```
+
+So final clock idea:
+
+```text id="nhhn91"
+versal_cips_0/pl0_ref_clk
+      ├── mvdr_top_axi_0/ap_clk
+      ├── axi_smc/aclk
+      ├── axi_noc_0/aclk6
+      └── reset block slowest_sync_clk
+```
+
+Do **not** use Debug/ILA to fix clock. Just wire the clock normally.
+
+---
+
+# What to do now, step by step
+
+## Step 1: Remove ILA blocks
+
+Delete these if present:
+
+```text id="i93eve"
+axis_ila_0
+axis_ila_1
+```
+
+They are not needed now.
+
+Do not delete:
+
+```text id="gx8s84"
+versal_cips_0
+axi_noc_0
+axi_smc
+mvdr_top_axi_0
+rst_versal_cips_0_99M
+```
+
+---
+
+## Step 2: Keep NoC as 7 interfaces
+
+Double-click:
+
+```text id="ncqf5h"
+axi_noc_0
+```
+
+Keep:
+
+```text id="tf2kzo"
+Number of S_AXI interfaces = 7
+```
+
+or:
+
+```text id="gt02xn"
+NUM_SI = 7
+```
+
+You need:
+
+```text id="vwymga"
+S00_AXI to S05_AXI → CIPS/DDR existing paths
+S06_AXI            → MVDR m_axi_gmem
+```
+
+---
+
+## Step 3: Connect MVDR memory port
+
+You already did this, but confirm:
+
+```text id="gkzg9b"
+mvdr_top_axi_0/m_axi_gmem → axi_noc_0/S06_AXI
+```
+
+This wire must remain.
+
+---
+
+## Step 4: Connect 7th NoC clock
+
+Manually connect:
+
+```text id="boxdrm"
+axi_noc_0/aclk6 → versal_cips_0/pl0_ref_clk
+```
+
+How to do it:
+
+1. Click `axi_noc_0/aclk6`
+2. Drag the wire to `versal_cips_0/pl0_ref_clk`
+3. Release
+
+If dragging is difficult, use Tcl Console:
+
+```tcl id="2fux26"
+connect_bd_net [get_bd_pins axi_noc_0/aclk6] [get_bd_pins versal_cips_0/pl0_ref_clk]
+```
+
+If Vivado says it is already connected, that is fine.
+
+---
+
+## Step 5: Connect MVDR clock
+
+Check:
+
+```text id="sdx8nv"
+mvdr_top_axi_0/ap_clk → versal_cips_0/pl0_ref_clk
+```
+
+If not connected, connect it.
+
+Tcl option:
+
+```tcl id="l2zs95"
+connect_bd_net [get_bd_pins mvdr_top_axi_0/ap_clk] [get_bd_pins versal_cips_0/pl0_ref_clk]
+```
+
+---
+
+## Step 6: Connect reset
+
+Check:
+
+```text id="exsvhj"
+mvdr_top_axi_0/ap_rst_n → rst_versal_cips_0_99M/peripheral_aresetn
+```
+
+It must be active-low reset.
+
+If not connected, connect it manually.
+
+---
+
+## Step 7: Fix S06_AXI DDR destination
+
+This is the real warning you had.
+
+In Tcl Console, paste:
+
+```tcl id="8oz21l"
+set_property -dict [list CONFIG.CONNECTIONS {MC_0 {read_bw {100} write_bw {100} read_avg_burst {4} write_avg_burst {4}}}] [get_bd_intf_pins /axi_noc_0/S06_AXI]
+```
+
+Then:
+
+```tcl id="8z90d9"
+assign_bd_address
+validate_bd_design
+```
+
+If `MC_0` gives an error, try:
+
+```tcl id="e78h6m"
+set_property -dict [list CONFIG.CONNECTIONS {MC_1 {read_bw {100} write_bw {100} read_avg_burst {4} write_avg_burst {4}}}] [get_bd_intf_pins /axi_noc_0/S06_AXI]
+
+assign_bd_address
+validate_bd_design
+```
+
+The warning that must disappear is:
+
+```text id="xxpzr8"
+Incomplete address path from /mvdr_top_axi_0/Data_m_axi_gmem
+```
+
+---
+
+# After validation passes
+
+Do these steps exactly.
+
+## Step 8: Save the block design
+
+Click:
+
+```text id="js46o9"
+Ctrl + S
+```
+
+or:
+
+```text id="sn4ptq"
+File → Save Block Design
+```
+
+---
+
+## Step 9: Generate Output Products
+
+In the **Sources** panel:
+
+1. Find `design_2.bd`
+2. Right-click it
+3. Click:
+
+```text id="c8zg38"
+Generate Output Products
+```
+
+Choose:
+
+```text id="pkwqwb"
+Global
+```
+
+Click:
+
+```text id="k8y07c"
+Generate
+```
+
+Wait until it finishes.
+
+---
+
+## Step 10: Create HDL Wrapper
+
+In **Sources** panel:
+
+1. Right-click `design_2.bd`
+2. Click:
+
+```text id="x9moqm"
+Create HDL Wrapper
+```
+
+Choose:
+
+```text id="0gk33a"
+Let Vivado manage wrapper and auto-update
+```
+
+Click:
+
+```text id="ujfwkq"
+OK
+```
+
+Now you should see something like:
+
+```text id="8l5qct"
+design_2_wrapper
+```
+
+---
+
+## Step 11: Run Synthesis
+
+Left side **Flow Navigator**:
+
+```text id="6tf8uy"
+Synthesis → Run Synthesis
+```
+
+Click **OK** if it asks.
+
+This may take time.
+
+When it finishes, choose:
+
+```text id="49u7j1"
+Open Synthesized Design
+```
+
+or just close the popup.
+
+Take screenshot of:
+
+```text id="cmu5nw"
+Synthesis completed successfully
+```
+
+If synthesis fails, copy the first real error.
+
+---
+
+## Step 12: Run Implementation
+
+Left side:
+
+```text id="lpg3jg"
+Implementation → Run Implementation
+```
+
+Click **OK**.
+
+This will take longer than synthesis.
+
+When it finishes, choose:
+
+```text id="67nsid"
+Open Implemented Design
+```
+
+Take screenshot.
+
+---
+
+## Step 13: Generate Device Image / Bitstream
+
+Left side:
+
+```text id="xlayf3"
+Program and Debug → Generate Device Image
+```
+
+or it may say:
+
+```text id="g1pj0o"
+Generate Bitstream
+```
+
+Click it.
+
+Wait until complete.
+
+Take screenshot of successful generation.
+
+---
+
+## Step 14: Export hardware
+
+After device image is generated:
+
+```text id="ixj5qn"
+File → Export → Export Hardware
+```
+
+or:
+
+```text id="rgybn6"
+File → Export → Export Platform
+```
+
+Select:
+
+```text id="9dq9aq"
+Include bitstream/device image
+```
+
+Output file will be something like:
+
+```text id="59wn6o"
+design_2_wrapper.xsa
+```
+
+This `.xsa` is needed for Vitis software.
+
+---
+
+# Your 7-day priority
+
+With only 7 days left, do not chase every warning.
+
+Your target is:
+
+```text id="unse5w"
+Day 1: Fix validation
+Day 2: Run synthesis
+Day 3: Run implementation
+Day 4: Generate device image / export XSA
+Day 5: Create Vitis application
+Day 6: Run on board / read weights
+Day 7: Report + screenshots
+```
+
+For now, answer to your main doubt:
+
+```text id="z7sair"
+Keep 7 interfaces.
+Connect axi_noc_0/aclk6 to versal_cips_0/pl0_ref_clk.
+Do not use ILA/debug blocks now.
+```
+
+After that, fix `S06_AXI → DDR` and validate again.
+
+
+
+  
