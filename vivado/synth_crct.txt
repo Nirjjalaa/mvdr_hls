@@ -1,0 +1,246 @@
+Since synth_1 says Not started, your synthesis is currently reset. So first: do not open synthesized design now. You need to rerun synthesis.
+
+Now about the clock: yes, it is okay to change Vivado clock to 50 MHz, even though HLS used 10 ns / 100 MHz.
+
+Why changing Vivado clock is okay
+
+In HLS, 10 ns was the target used during HLS scheduling.
+
+But after exporting the IP, the actual FPGA clock comes from Vivado:
+
+versal_cips_0/pl0_ref_clk → mvdr_top_axi_0/ap_clk
+
+If you run the hardware slower, the circuit gets more time per cycle.
+
+100 MHz = 10 ns per cycle
+50 MHz  = 20 ns per cycle
+
+So changing to 50 MHz is not wrong. It is actually safer for timing.
+
+Will 50 MHz definitely work?
+
+I need to be honest: I cannot guarantee before implementation finishes.
+
+But based on your note:
+
+Worst slack = -1.936 ns at around 100 MHz
+
+that means the path needs roughly:
+
+10 ns + 1.936 ns = 11.936 ns
+
+At 50 MHz, Vivado gives:
+
+20 ns
+
+So 50 MHz gives much more timing margin.
+
+Therefore:
+
+100 MHz: likely timing problem
+50 MHz: very likely to pass timing
+
+But the only final proof is:
+
+Run Implementation → Timing Summary → WNS >= 0
+
+If WNS is positive or zero after implementation, then timing is met.
+
+
+---
+
+Permanent practical solution
+
+Do this. Do not keep changing many things.
+
+Step 1: Remove ILA blocks if still present
+
+Delete:
+
+axis_ila_0
+axis_ila_1
+
+They are not needed and can make routing/timing harder.
+
+Step 2: Change PL clock to 50 MHz
+
+In block design:
+
+1. Double-click versal_cips_0
+
+
+2. Find PL clock settings
+
+
+3. Find:
+
+
+
+pl0_ref_clk
+
+4. Change frequency from around:
+
+
+
+99 MHz / 100 MHz
+
+to:
+
+50 MHz
+
+5. Click OK
+
+
+
+Make sure this same clock goes to:
+
+mvdr_top_axi_0/ap_clk
+axi_smc/aclk
+axi_noc_0/aclk6
+rst_versal_cips_0_99M/slowest_sync_clk
+
+The reset block name may still say 99M. That name is not important. The actual connected clock frequency is what matters.
+
+Step 3: Validate design again
+
+Click:
+
+Validate Design
+
+Fix only real errors. Do not chase harmless warnings.
+
+Step 4: Save block design
+
+Press:
+
+Ctrl + S
+
+Step 5: Regenerate output products
+
+Right-click design_2.bd:
+
+Generate Output Products
+
+Choose:
+
+Global
+
+Then generate.
+
+Step 6: Reset synthesis properly
+
+In Tcl Console:
+
+reset_run synth_1
+
+Then run:
+
+launch_runs synth_1 -jobs 4
+
+Or click:
+
+Run Synthesis
+
+Since your status is Not started, this is required.
+
+Step 7: After synthesis completes
+
+Check:
+
+Design Runs → synth_1 → Status
+
+It should say:
+
+Synthesis Complete
+
+Then open:
+
+Reports → Timing Summary
+
+If synthesis timing still shows negative slack, do not panic. Implementation timing is more important.
+
+Step 8: Run implementation
+
+Click:
+
+Run Implementation
+
+Wait.
+
+After implementation completes, check:
+
+Open Implemented Design
+Reports → Timing Summary
+
+The important number is:
+
+WNS
+
+If:
+
+WNS >= 0
+
+then timing passed.
+
+If:
+
+WNS < 0
+
+then timing failed.
+
+
+---
+
+If 50 MHz still fails
+
+Then the permanent fix is not Vivado connection. It is HLS architecture.
+
+The real fixes would be:
+
+1. Use float instead of double
+2. Add more HLS pipeline stages
+3. Avoid deep chained floating-point expressions
+4. Break QRD/covariance operations into smaller registered stages
+5. Use fixed-point later
+
+But with your time limit, do not rewrite the whole design now unless 50 MHz fails.
+
+Your best stable path now
+
+Use 50 MHz
+Remove ILA
+Validate
+Run synthesis
+Run implementation
+Check WNS
+Generate device image
+Export XSA
+Run Vitis software
+
+What to tell sir
+
+Say this:
+
+> The HLS IP was initially generated with a 10 ns target clock for scheduling. During Vivado system integration, timing warnings appeared due to double-precision complex arithmetic and long cascaded floating-point paths. For reliable FPGA implementation, I relaxed the PL clock to 50 MHz. This gives 20 ns per clock cycle and improves timing closure while preserving the functional correctness of the MVDR accelerator.
+
+
+
+That is a valid answer.
+
+Final decision
+
+Yes, change Vivado to 50 MHz now.
+
+It is the safest practical solution for FPGA implementation with your current double-precision MVDR design. But final confirmation comes only after:
+
+Implementation timing passed: WNS >= 0
+
+
+
+
+
+
+
+
+
+
