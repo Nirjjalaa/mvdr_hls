@@ -244,3 +244,566 @@ Implementation timing passed: WNS >= 0
 
 
 
+
+
+Yes, the above solution still applies, even though you moved the project from Windows to Linux through the shared rda folder.
+
+But since synth_1 now says Not started, your old synthesized result is not active anymore. The clickable Open Synthesized Design is likely from the old/cached checkpoint. Ignore it for now.
+
+Do this first:
+
+Close Synthesized Design
+Change PL clock
+Validate
+Run synthesis again
+
+
+---
+
+1. Should you change from 100 MHz to 50 MHz?
+
+Yes.
+
+Your earlier timing problem was around:
+
+WNS = -1.936 ns
+
+That means the design needed about:
+
+10 ns + 1.936 ns = 11.936 ns
+
+So at 50 MHz:
+
+20 ns clock period
+
+you get much more timing room.
+
+But since you asked for the most reliable option:
+
+Use 25 MHz if FPGA run is more important than speed
+
+25 MHz = 40 ns clock period
+
+That is much safer than 50 MHz.
+
+Your MVDR IP will run slower, but for internship demonstration, correctness matters more than speed.
+
+So my recommendation now is:
+
+Try 50 MHz first.
+If implementation still has negative WNS, use 25 MHz.
+
+If you want maximum chance of success immediately:
+
+Go directly to 25 MHz.
+
+I cannot honestly guarantee any FPGA implementation before Vivado implementation reports WNS >= 0, but 25 MHz is the strongest quick fix without rewriting HLS.
+
+AMD’s Versal flow allows configuration of PL fabric clocks from CIPS clocking settings; AMD examples explicitly configure PL0_REF_CLK inside the CIPS Clocking → Output Clocks tab. 
+
+
+---
+
+2. Exact steps now in Linux Vivado
+
+Step A — Close old synthesized design
+
+In Vivado:
+
+File → Close Design
+
+If it asks to save, save.
+
+Do not click Open Synthesized Design now.
+
+
+---
+
+Step B — Remove ILA blocks if they still exist
+
+In block design, delete:
+
+axis_ila_0
+axis_ila_1
+
+They are not needed for your first successful FPGA run.
+
+
+---
+
+Step C — Change PL clock
+
+1. Open your block design.
+
+
+2. Double-click:
+
+
+
+versal_cips_0
+
+3. Go to:
+
+
+
+Clocking
+
+4. Find:
+
+
+
+Output Clocks
+PL Fabric Clocks
+PL0_REF_CLK
+
+5. Change it to either:
+
+
+
+50 MHz
+
+or safer:
+
+25 MHz
+
+Since you want “must run”, choose 25 MHz.
+
+6. Click:
+
+
+
+OK
+
+If Vivado asks to update automation, allow it.
+
+
+---
+
+Step D — Make sure the same clock goes everywhere
+
+Check these connections:
+
+versal_cips_0/pl0_ref_clk → mvdr_top_axi_0/ap_clk
+versal_cips_0/pl0_ref_clk → axi_smc/aclk
+versal_cips_0/pl0_ref_clk → axi_noc_0/aclk6
+versal_cips_0/pl0_ref_clk → rst block/slowest_sync_clk
+
+The reset block may still be named rst_versal_cips_0_99M. That name is okay; the actual clock connection matters.
+
+
+---
+
+Step E — Validate again
+
+Click:
+
+Validate Design
+
+The important warning that should be gone is:
+
+Incomplete address path from /mvdr_top_axi_0/Data_m_axi_gmem
+
+If that warning still appears, fix S06_AXI → DDR first.
+
+
+---
+
+Step F — Save and regenerate output products
+
+1. Press:
+
+
+
+Ctrl + S
+
+2. Right-click:
+
+
+
+design_2.bd
+
+3. Click:
+
+
+
+Generate Output Products
+
+4. Choose:
+
+
+
+Global
+
+5. Click:
+
+
+
+Generate
+
+
+---
+
+Step G — Run synthesis properly
+
+Since synth_1 is Not started, run:
+
+Run Synthesis
+
+or in Tcl:
+
+launch_runs synth_1 -jobs 4
+
+Wait until it completes.
+
+Then check:
+
+Design Runs → synth_1 → Status
+
+It should say:
+
+Synthesis Complete
+
+
+---
+
+Step H — Run implementation
+
+After synthesis completes:
+
+Run Implementation
+
+After implementation completes, open:
+
+Reports → Timing Summary
+
+The most important number is:
+
+WNS
+
+If:
+
+WNS >= 0
+
+then it is timing-clean.
+
+If:
+
+WNS < 0
+
+then reduce clock further or use the fallback version.
+
+
+---
+
+3. Should we use ap_fixed now?
+
+Not as the first fallback.
+
+ap_fixed is powerful, but it is not a quick patch for your full design because your design has:
+
+sin/cos
+sqrt
+division
+complex QRD
+covariance accumulation
+normalization
+
+Fixed-point needs careful word-length scaling. AMD documents that ap_fixed<W,I,...> requires choosing total width and integer bits, and fixed-point C simulation is bit-accurate with the hardware, which is good but also means every scaling mistake directly affects accuracy. 
+
+That is why the previous group probably got an error like:
+
+0.04
+
+It may still be acceptable depending on the tolerance, but it is riskier than float.
+
+Better fallback than ap_fixed: use float
+
+float is the best emergency fallback because:
+
+Less hardware than double
+Much easier timing than double
+Less code change than ap_fixed
+Less accuracy loss than poorly scaled fixed-point
+
+AMD’s HLS docs list both float and double as supported standard C/C++ data types. 
+
+So your fallback order should be:
+
+1. Existing double design at 25 MHz
+2. Float version at 50 MHz or 100 MHz
+3. ap_fixed only if guide specifically demands fixed-point
+
+
+---
+
+4. Float fallback code changes
+
+Do this only in a duplicate HLS project, not in the working double version.
+
+Name it:
+
+mvdr_top_axi_float
+
+Change 1 — In every module header
+
+Wherever you have:
+
+typedef std::complex<double> cplx;
+
+change it to:
+
+typedef std::complex<float> cplx;
+
+This applies to:
+
+steering_vec.h
+qr.h
+qh_multiply.h
+backsub.h
+normalize_weights.h
+
+
+---
+
+Change 2 — mvdr_axi_top.h
+
+Replace your current mvdr_axi_top.h with this float version:
+
+#ifndef MVDR_AXI_TOP_H
+#define MVDR_AXI_TOP_H
+
+#define MVDR_AXI_N        64
+#define MVDR_AXI_K        5000
+#define MVDR_AXI_SAMPLES  320000
+
+void mvdr_top_axi(
+    const float Xtrain_real[MVDR_AXI_SAMPLES],
+    const float Xtrain_imag[MVDR_AXI_SAMPLES],
+
+    float az_deg,
+    float el_deg,
+    float d,
+
+    float w_real[MVDR_AXI_N],
+    float w_imag[MVDR_AXI_N]
+);
+
+#endif
+
+
+---
+
+Change 3 — In all design .cpp files
+
+Replace most double variables with float.
+
+For example, change:
+
+double sum_real = 0.0;
+double sum_imag = 0.0;
+
+to:
+
+float sum_real = 0.0f;
+float sum_imag = 0.0f;
+
+Change constants like:
+
+1.0
+0.0
+1.0e-30
+
+to:
+
+1.0f
+0.0f
+1.0e-20f
+
+For float, do not use 1e-30f everywhere. It is too tiny and not useful for float.
+
+Use:
+
+1.0e-20f
+
+for zero-denominator protection.
+
+
+---
+
+Change 4 — Use float math functions
+
+In steering vector, use:
+
+sinf()
+cosf()
+sqrtf()
+
+Example:
+
+float az =
+    az_deg * PI / 180.0f;
+
+float u =
+    sinf(az) *
+    cosf(el);
+
+In QRD, use:
+
+sqrtf(value)
+
+instead of:
+
+std::sqrt(value)
+
+This avoids unnecessary double promotion.
+
+
+---
+
+Change 5 — mvdr_axi_top.cpp function signature
+
+Change the top signature to:
+
+void mvdr_top_axi(
+    const float Xtrain_real[MVDR_AXI_SAMPLES],
+    const float Xtrain_imag[MVDR_AXI_SAMPLES],
+
+    float az_deg,
+    float el_deg,
+    float d,
+
+    float w_real[MVDR_AXI_N],
+    float w_imag[MVDR_AXI_N]
+)
+
+Inside covariance_from_axi, change:
+
+double
+
+to:
+
+float
+
+
+---
+
+Change 6 — Testbench arrays
+
+In tb_mvdr_axi_top.cpp, change only the AXI arrays:
+
+static float Xtrain_real[MVDR_AXI_SAMPLES];
+static float Xtrain_imag[MVDR_AXI_SAMPLES];
+
+static float w_hls_real[MVDR_AXI_N];
+static float w_hls_imag[MVDR_AXI_N];
+
+Your CSV reader can still read double from file, then cast:
+
+Xtrain_real[index] =
+    (float)real_values[index];
+
+Xtrain_imag[index] =
+    (float)imag_values[index];
+
+When reconstructing complex for comparison:
+
+w_hls[i] =
+    tb_cplx(
+        (double)w_hls_real[i],
+        (double)w_hls_imag[i]
+    );
+
+Keep MATLAB golden values as double in the testbench.
+
+
+---
+
+Change 7 — Relax tolerance
+
+For float, do not expect 1e-14.
+
+Use:
+
+const double TOLERANCE =
+    1.0e-3;
+
+If the relative error is slightly larger but still reasonable, use:
+
+5.0e-2
+
+only for emergency demonstration.
+
+
+---
+
+5. Do I recommend writing full ap_fixed now?
+
+No, not today.
+
+A full fixed-point QRD/MVDR version is a separate project. It would require:
+
+Choosing word length
+Choosing integer/fraction bits
+Scaling covariance values
+Testing QRD stability
+Testing normalization error
+Retuning diagonal loading
+Comparing beam pattern
+
+With 7 days left, ap_fixed is not the safest path. AMD supports ap_fixed, but the design must be bit-accurately validated for quantization and overflow, not just compiled. 
+
+
+---
+
+6. Your best plan now
+
+Use this exact order:
+
+1. Existing double AXI design
+2. Remove ILA
+3. Set PL0_REF_CLK = 25 MHz
+4. Validate
+5. Generate output products
+6. Run synthesis
+7. Run implementation
+8. Check WNS
+
+If WNS >= 0:
+
+Continue to device image and XSA
+
+If WNS < 0 even at 25 MHz:
+
+Use the float fallback HLS version
+Package it
+Replace IP in Vivado
+Run synthesis/implementation again
+
+Do not start with ap_fixed.
+
+
+---
+
+7. What to say about the previous group’s fixed-point error
+
+Say:
+
+> A fixed-point version is possible, but it requires careful scaling. Previous implementations obtained around 0.04 numerical error, which shows that quantization affects MVDR accuracy. For the current deadline, I first implemented a double-precision verified baseline and will use clock relaxation or single-precision floating point as the practical FPGA implementation path. Fixed-point conversion can be considered as future optimization.
+
+
+
+That is a strong and valid answer.
+
+Bottom line
+
+Yes, the clock solution still works after moving to Linux.
+
+Your immediate action:
+
+Set PL0_REF_CLK to 25 MHz
+Validate
+Run synthesis again
+Run implementation
+Check WNS
+
+Only if this fails, go to the float fallback, not full ap_fixed.
