@@ -1,0 +1,731 @@
+Yes. Today your goal is not to redesign Vivado. Your goal is:
+
+XSA → Vitis platform → Hello World → MVDR IP run → print weights
+
+Your Vivado part is already successful:
+
+Implementation done ✅
+Timing met ✅
+XSA exported ✅
+
+Now you need to prove the IP can be started from the processor and can return output.
+
+AMD’s Vitis embedded flow uses the .xsa to create a platform, then an application runs on the processor to control the hardware IP. AMD’s 2024.2 docs describe creating a Vitis platform from XSA using File → New Component → Platform, and creating an application using File → New Component → Application. 
+
+
+---
+
+What you should do today
+
+Part 1 — Save your Vivado result safely
+
+Before touching Vitis, save these:
+
+1. mvdr_versal.xsa
+2. timing summary screenshot
+3. utilization screenshot
+4. power report screenshot
+5. block design screenshot
+
+Rename your XSA clearly:
+
+mvdr_versal_timing_passed.xsa
+
+Do not delete or overwrite this.
+
+
+---
+
+Part 2 — Use the Linux server only for Vitis board run
+
+On the Linux server, make a local folder, not inside shared rda if possible:
+
+mkdir -p /home/$USER/mvdr_vitis
+mkdir -p /home/$USER/mvdr_vitis/workspace
+mkdir -p /home/$USER/mvdr_vitis/xsa
+
+Copy your XSA there:
+
+/home/yourname/mvdr_vitis/xsa/mvdr_versal_timing_passed.xsa
+
+This avoids shared-folder timestamp problems.
+
+
+---
+
+Vitis step-by-step
+
+Step 1 — Open Vitis
+
+In terminal, depending on lab setup:
+
+source /tools/Xilinx/Vitis/2024.2/settings64.sh
+vitis -w /home/$USER/mvdr_vitis/workspace
+
+If the lab uses another install path, ask them what command they use to open Vitis.
+
+
+---
+
+Step 2 — Create platform from XSA
+
+In Vitis:
+
+File
+→ New Component
+→ Platform
+
+Name:
+
+mvdr_platform
+
+Choose:
+
+Create from XSA
+
+Select:
+
+mvdr_versal_timing_passed.xsa
+
+Processor/domain:
+
+psv_cortexa72_0
+standalone
+
+Then build platform.
+
+Expected time:
+
+10–30 minutes
+
+
+---
+
+Step 3 — First create Hello World
+
+Do not directly run MVDR first.
+
+Create a simple Hello World application:
+
+File
+→ New Component
+→ Application
+
+Name:
+
+hello_mvdr_test
+
+Select your platform:
+
+mvdr_platform
+
+Choose:
+
+Hello World
+
+Build it.
+
+Then run it on hardware.
+
+Open serial terminal/PuTTY.
+
+Serial settings usually:
+
+Baud rate: 115200
+Data bits: 8
+Parity: None
+Stop bits: 1
+Flow control: None
+
+You should see:
+
+Hello World
+
+If Hello World does not print, do not run MVDR yet. Fix board connection/serial first.
+
+
+---
+
+Step 4 — MVDR IP test application
+
+After Hello World works, create another application:
+
+mvdr_ip_test
+
+Use an Empty Application template.
+
+Then add this file:
+
+main.c
+
+This code is a board smoke test. It generates deterministic training data inside the ARM processor, sends it to your MVDR IP through DDR, starts the IP, waits with timeout, then prints first weights.
+
+This code assumes your HLS top is still the double version:
+
+double Xtrain_real[320000]
+double Xtrain_imag[320000]
+double w_real[64]
+double w_imag[64]
+
+
+---
+
+main.c code for Vitis
+
+#include "xparameters.h"
+#include "xil_cache.h"
+#include "xil_printf.h"
+#include "xstatus.h"
+
+#include "xmvdr_top_axi.h"
+
+#include <stdint.h>
+#include <math.h>
+
+#define NX 8
+#define NY 8
+#define N  64
+#define K  5000
+#define SAMPLES (N*K)
+
+#define PI 3.14159265358979323846
+
+static double Xtrain_real[SAMPLES] __attribute__((aligned(64)));
+static double Xtrain_imag[SAMPLES] __attribute__((aligned(64)));
+
+static double w_real[N] __attribute__((aligned(64)));
+static double w_imag[N] __attribute__((aligned(64)));
+
+static double a_s_real[N];
+static double a_s_imag[N];
+
+static double a_i1_real[N];
+static double a_i1_imag[N];
+
+static double a_i2_real[N];
+static double a_i2_imag[N];
+
+static uint32_t rng_state = 123456789u;
+
+static double rand_unit(void)
+{
+    rng_state = 1664525u * rng_state + 1013904223u;
+    uint32_t v = (rng_state >> 8) & 0x00FFFFFFu;
+    return ((double)v / 16777215.0) * 2.0 - 1.0;
+}
+
+static void make_steering(
+    double az_deg,
+    double el_deg,
+    double d,
+    double ar[N],
+    double ai[N]
+)
+{
+    double az = az_deg * PI / 180.0;
+    double el = el_deg * PI / 180.0;
+
+    double u = sin(az) * cos(el);
+    double v = sin(el);
+
+    int index = 0;
+
+    for (int y = 0; y < NY; y++) {
+        for (int x = 0; x < NX; x++) {
+            double phase = 2.0 * PI * d * ((double)x * u + (double)y * v);
+
+            ar[index] = cos(phase) / sqrt((double)N);
+            ai[index] = sin(phase) / sqrt((double)N);
+
+            index++;
+        }
+    }
+}
+
+static void generate_training_data(void)
+{
+    double d = 0.5;
+
+    make_steering(40.0,   0.0,  d, a_s_real,  a_s_imag);
+    make_steering(30.0,  10.0,  d, a_i1_real, a_i1_imag);
+    make_steering(-60.0, -25.0, d, a_i2_real, a_i2_imag);
+
+    for (int k = 0; k < K; k++) {
+        double t = (double)k / (double)K;
+
+        double sr = cos(2.0 * PI * 50.0 * t);
+        double si = sin(2.0 * PI * 50.0 * t);
+
+        double i1r = rand_unit();
+        double i1i = rand_unit();
+
+        double i2r = rand_unit();
+        double i2i = rand_unit();
+
+        for (int n = 0; n < N; n++) {
+            double xr = 0.0;
+            double xi = 0.0;
+
+            /* target component: 10 * s * a_s */
+            xr += 10.0 * (sr * a_s_real[n] - si * a_s_imag[n]);
+            xi += 10.0 * (sr * a_s_imag[n] + si * a_s_real[n]);
+
+            /* interference 1: 5 * i1 * a_i1 */
+            xr += 5.0 * (i1r * a_i1_real[n] - i1i * a_i1_imag[n]);
+            xi += 5.0 * (i1r * a_i1_imag[n] + i1i * a_i1_real[n]);
+
+            /* interference 2: 5 * i2 * a_i2 */
+            xr += 5.0 * (i2r * a_i2_real[n] - i2i * a_i2_imag[n]);
+            xi += 5.0 * (i2r * a_i2_imag[n] + i2i * a_i2_real[n]);
+
+            /* small noise */
+            xr += 0.1 * rand_unit();
+            xi += 0.1 * rand_unit();
+
+            /*
+             * IMPORTANT:
+             * This assumes your HLS AXI top flattened the input as:
+             * index = sensor_index * K + snapshot_index
+             */
+            int idx = n * K + k;
+
+            Xtrain_real[idx] = xr;
+            Xtrain_imag[idx] = xi;
+        }
+    }
+
+    for (int n = 0; n < N; n++) {
+        w_real[n] = 0.0;
+        w_imag[n] = 0.0;
+    }
+}
+
+static void print_double_6(const char *name, double value)
+{
+    int neg = 0;
+
+    if (value < 0.0) {
+        neg = 1;
+        value = -value;
+    }
+
+    int scaled = (int)(value * 1000000.0 + 0.5);
+    int whole = scaled / 1000000;
+    int frac  = scaled % 1000000;
+
+    xil_printf("%s", name);
+
+    if (neg) {
+        xil_printf("-");
+    }
+
+    xil_printf("%d.%06d", whole, frac);
+}
+
+int main(void)
+{
+    xil_printf("\r\n==============================\r\n");
+    xil_printf("MVDR AXI IP Board Test Started\r\n");
+    xil_printf("==============================\r\n");
+
+    xil_printf("Generating training data...\r\n");
+    generate_training_data();
+    xil_printf("Training data generated.\r\n");
+
+    xil_printf("First sample: ");
+    print_double_6("", Xtrain_real[0]);
+    xil_printf(" + j");
+    print_double_6("", Xtrain_imag[0]);
+    xil_printf("\r\n");
+
+    XMvdr_top_axi ip;
+
+    int status = XMvdr_top_axi_Initialize(&ip, XPAR_XMVDR_TOP_AXI_0_DEVICE_ID);
+
+    if (status != XST_SUCCESS) {
+        xil_printf("ERROR: MVDR IP initialization failed.\r\n");
+        return -1;
+    }
+
+    xil_printf("MVDR IP initialized.\r\n");
+
+    /*
+     * Flush input and output buffers before IP starts.
+     * This makes sure DDR has the latest CPU-written data.
+     */
+    Xil_DCacheFlushRange((UINTPTR)Xtrain_real, sizeof(Xtrain_real));
+    Xil_DCacheFlushRange((UINTPTR)Xtrain_imag, sizeof(Xtrain_imag));
+    Xil_DCacheFlushRange((UINTPTR)w_real, sizeof(w_real));
+    Xil_DCacheFlushRange((UINTPTR)w_imag, sizeof(w_imag));
+
+    /*
+     * Set AXI pointer arguments.
+     */
+    XMvdr_top_axi_Set_Xtrain_real(&ip, (UINTPTR)Xtrain_real);
+    XMvdr_top_axi_Set_Xtrain_imag(&ip, (UINTPTR)Xtrain_imag);
+
+    XMvdr_top_axi_Set_w_real(&ip, (UINTPTR)w_real);
+    XMvdr_top_axi_Set_w_imag(&ip, (UINTPTR)w_imag);
+
+    /*
+     * Set scalar arguments.
+     */
+    XMvdr_top_axi_Set_az_deg(&ip, 40.0);
+    XMvdr_top_axi_Set_el_deg(&ip, 0.0);
+    XMvdr_top_axi_Set_d(&ip, 0.5);
+
+    xil_printf("Starting MVDR IP...\r\n");
+
+    XMvdr_top_axi_Start(&ip);
+
+    /*
+     * Timeout wait.
+     * Do not wait forever if something is wrong.
+     */
+    volatile unsigned int timeout = 0xFFFFFFFFu;
+
+    while (!XMvdr_top_axi_IsDone(&ip) && timeout > 0u) {
+        timeout--;
+    }
+
+    if (timeout == 0u) {
+        xil_printf("ERROR: MVDR IP timeout. ap_done did not arrive.\r\n");
+        xil_printf("Stop this run. Check AXI address, DDR path, cache, and clock/reset.\r\n");
+        return -2;
+    }
+
+    xil_printf("MVDR IP done.\r\n");
+
+    /*
+     * Invalidate output buffers after IP finishes.
+     * This makes CPU read the latest FPGA-written DDR data.
+     */
+    Xil_DCacheInvalidateRange((UINTPTR)w_real, sizeof(w_real));
+    Xil_DCacheInvalidateRange((UINTPTR)w_imag, sizeof(w_imag));
+
+    xil_printf("\r\nFirst 8 MVDR weights:\r\n");
+
+    for (int i = 0; i < 8; i++) {
+        xil_printf("w[%d] = ", i);
+        print_double_6("", w_real[i]);
+        xil_printf(" + j");
+        print_double_6("", w_imag[i]);
+        xil_printf("\r\n");
+    }
+
+    xil_printf("\r\nMVDR AXI IP Board Test Completed Successfully.\r\n");
+
+    return 0;
+}
+
+
+---
+
+If this line gives error
+
+#include "xmvdr_top_axi.h"
+
+Then your driver name may be slightly different.
+
+In Vitis, search inside the platform/BSP folder for:
+
+xmvdr
+
+or open:
+
+xparameters.h
+
+Search for:
+
+MVDR
+
+Possible generated names:
+
+xmvdr_top_axi.h
+XMvdr_top_axi
+XPAR_XMVDR_TOP_AXI_0_DEVICE_ID
+
+or sometimes:
+
+xmvdr_top_axi_0.h
+XPAR_MVDR_TOP_AXI_0_DEVICE_ID
+
+Use whatever exact name Vitis generated.
+
+
+---
+
+If sin, cos, or sqrt gives linker error
+
+If build says:
+
+undefined reference to sin
+undefined reference to cos
+undefined reference to sqrt
+
+then add math library:
+
+-lm
+
+In Vitis application settings:
+
+C/C++ Build Settings
+→ Libraries
+→ Add m
+
+Or ask the lab guy where to add linker library in their Vitis version.
+
+
+---
+
+How long should you run it?
+
+For each MVDR test:
+
+Run once.
+Wait for ap_done.
+Print weights.
+Stop.
+
+Do not run it continuously.
+
+Time limit rule
+
+If output does not come within:
+
+5–10 minutes
+
+stop the run.
+
+That means something is wrong:
+
+wrong driver name
+wrong address
+DDR issue
+cache issue
+clock/reset issue
+XSA mismatch
+
+Do not leave it stuck for 30 minutes.
+
+
+---
+
+Expected output
+
+On PuTTY / serial terminal, you want to see:
+
+MVDR AXI IP Board Test Started
+Generating training data...
+Training data generated.
+MVDR IP initialized.
+Starting MVDR IP...
+MVDR IP done.
+
+First 8 MVDR weights:
+w[0] = ...
+w[1] = ...
+...
+MVDR AXI IP Board Test Completed Successfully.
+
+That is enough to prove board execution.
+
+
+---
+
+Today’s exact target
+
+Minimum success
+
+Hello World prints on PuTTY ✅
+
+Good success
+
+MVDR IP initialized ✅
+MVDR IP started ✅
+ap_done received ✅
+weights printed ✅
+
+Best success
+
+First few weights match HLS/MATLAB trend ✅
+
+
+---
+
+If MVDR IP times out
+
+Do not redesign immediately.
+
+Check in this order:
+
+1. Did Hello World print?
+2. Is XSA exported with device image included?
+3. Is the driver header generated?
+4. Is the correct DEVICE_ID used?
+5. Are input/output arrays in DDR?
+6. Did you flush input cache before start?
+7. Did you invalidate output cache after done?
+8. Is m_axi_gmem connected to DDR?
+9. Is s_axi_control address assigned?
+10. Are clock and reset connected?
+
+Only if these fail, then revisit Vivado.
+
+
+---
+
+What to tell your guide today
+
+Say this:
+
+> Vivado synthesis and implementation are complete, timing is met, and XSA has been exported. Today I am creating the Vitis platform from the XSA and running a standalone A72 test application. First I will verify board communication using Hello World, then start the MVDR AXI IP, wait for ap_done with timeout, and print the generated 64 complex MVDR weights through UART/PuTTY.
+
+
+
+This is exactly the right next step.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  SAIF is just an activity report file.
+
+Full form:
+
+SAIF = Switching Activity Interchange Format
+
+It tells Vivado:
+
+Which signals toggled
+How many times they toggled
+How long they stayed 0 or 1
+How active the clock/data paths really were
+
+Vivado uses that to estimate power more accurately.
+
+Why Vivado asks for SAIF
+
+Without SAIF, Vivado guesses activity. It may assume something like:
+
+many signals are switching regularly
+
+So power can become pessimistic.
+
+With SAIF, Vivado sees actual simulation activity:
+
+This signal toggled often
+This signal stayed idle
+This DSP was active only during computation
+This register hardly changed
+
+Then the power report becomes more realistic.
+
+Simple example
+
+Without SAIF:
+
+Vivado: I don't know activity, so I will estimate.
+Power confidence: Low
+
+With SAIF:
+
+Vivado: I saw actual switching from simulation.
+Power confidence: Medium/High
+
+How long would SAIF take?
+
+For your project, honestly:
+
+Not quick.
+
+Because your design has:
+
+Versal CIPS
+AXI NoC
+DDR path
+HLS MVDR IP
+Large Xtrain input
+Double-precision arithmetic
+QR decomposition
+
+Rough time
+
+SAIF type	Time	Usefulness
+
+HLS C simulation activity	Already done, but not enough for Vivado full power	
+RTL simulation of only MVDR IP	1–4 hours maybe, if setup works	
+Full block design simulation with CIPS/NoC/DDR	Very difficult, may take 1–2 days or more	
+Post-implementation timing simulation + SAIF	Not recommended now; can be very slow	
+
+
+For your deadline, SAIF is not worth doing now.
+
+Why I don’t recommend SAIF now
+
+To generate SAIF properly, you need:
+
+1. A proper RTL simulation testbench
+2. Input stimulus for Xtrain_real/Xtrain_imag
+3. Simulation long enough for MVDR IP to run
+4. SAIF dump enabled
+5. Import SAIF into implemented design
+6. Rerun report_power
+
+Your full MVDR design uses 320000 real samples + 320000 imaginary samples. RTL simulation with that much data can become slow.
+
+So you may lose a full day just trying to get SAIF, and it will not help your main goal:
+
+Run FPGA and print MVDR weights
+
+What you should do instead
+
+Since your implementation already passed timing and XSA is exported, do this:
+
+1. Keep the current XSA safely.
+2. Run a refined power report using realistic operating conditions.
+3. Do Vitis board run.
+4. Run MVDR IP once, print weights, stop.
+
+In Vivado Tcl, you can do this quick power-report improvement:
+
+open_run impl_1
+set_operating_conditions -ambient_temp 25.0 -airflow 250 -heatsink medium
+report_power -file mvdr_power_refined.rpt
+
+This is much faster than SAIF.
+
+What to write if sir asks about SAIF
+
+Say:
+
+> SAIF is a switching activity file generated from simulation. It improves power estimation by giving Vivado real signal-toggle information instead of default activity assumptions. Since full-system SAIF generation for a Versal design with CIPS, NoC, DDR and MVDR HLS IP is time-consuming, this work uses Vivado’s implemented power estimate with realistic operating conditions. SAIF-based power estimation is considered as future refinement.
+
+
+
+That is a good answer.
+
+Final decision
+
+Do not do SAIF now.
+
+Your priority is:
+
+Vitis Hello World
+↓
+MVDR IP run
+↓
+Print 64 complex weights
+↓
+Compare first few weights
+
+SAIF is only for improving the power estimate, not for making the FPGA design run.
