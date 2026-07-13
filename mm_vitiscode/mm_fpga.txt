@@ -1,0 +1,1115 @@
+Yes. We will do this slowly, from zero, and the goal is:
+
+FPGA output weights = MATLAB golden weights
+
+You already proved that the board can run the IP. Now we are doing the final verification.
+
+Do not delete your old working mvdr_ip_test. We will create a new separate application so your working result stays safe.
+
+
+---
+
+What you are going to do now
+
+You will do 4 things:
+
+1. Export MATLAB data in correct order.
+2. Convert MATLAB CSV files into one C header file: mvdr_data.h.
+3. Create a new Vitis application: mvdr_matlab_verify.
+4. Run FPGA and compare FPGA weights with MATLAB weights.
+
+
+---
+
+PART 1 — MATLAB export in the correct order
+
+Open your MATLAB code where you already generate:
+
+Xtrain
+w
+
+At the very end of your MATLAB code, after MVDR weight calculation is complete, paste this:
+
+% ============================================================
+% EXPORT DATA FOR VITIS FPGA VERIFICATION
+% ============================================================
+
+N = 64;
+K = 5000;
+
+% Xtrain must be 64 x 5000
+assert(isequal(size(Xtrain), [N K]), 'Xtrain must be 64 x 5000');
+
+% w must be 64 x 1
+w = w(:);
+assert(length(w) == N, 'w must contain 64 weights');
+
+% Export Xtrain as a 64 x 5000 matrix
+% Each row = one sensor
+% Each column = one snapshot
+writematrix(real(Xtrain), 'Xtrain_real.csv');
+writematrix(imag(Xtrain), 'Xtrain_imag.csv');
+
+% Export MATLAB golden MVDR weights
+writematrix(real(w), 'w_real.csv');
+writematrix(imag(w), 'w_imag.csv');
+
+fprintf('\nExport completed.\n');
+
+fprintf('\nSanity check values:\n');
+fprintf('MATLAB Xtrain(1,1) = %.12f + j%.12f\n', real(Xtrain(1,1)), imag(Xtrain(1,1)));
+fprintf('MATLAB Xtrain(1,2) = %.12f + j%.12f\n', real(Xtrain(1,2)), imag(Xtrain(1,2)));
+fprintf('MATLAB Xtrain(2,1) = %.12f + j%.12f\n', real(Xtrain(2,1)), imag(Xtrain(2,1)));
+
+fprintf('\nFirst 8 MATLAB weights:\n');
+for i = 1:8
+    fprintf('w(%d) = %.12f + j%.12f\n', i, real(w(i)), imag(w(i)));
+end
+
+Run the MATLAB file.
+
+After running, you should get these 4 files:
+
+Xtrain_real.csv
+Xtrain_imag.csv
+w_real.csv
+w_imag.csv
+
+Very important: do not export Xtrain(:).
+
+This is correct:
+
+writematrix(real(Xtrain), 'Xtrain_real.csv');
+
+This is wrong for our FPGA order:
+
+writematrix(real(Xtrain(:)), 'Xtrain_real.csv');
+
+Why? Because our HLS/FPGA expects:
+
+index = sensor_index * K + snapshot_index
+
+That means:
+
+Xtrain_data[0]    = MATLAB Xtrain(1,1)
+Xtrain_data[1]    = MATLAB Xtrain(1,2)
+Xtrain_data[5000] = MATLAB Xtrain(2,1)
+
+
+---
+
+PART 2 — Copy the 4 CSV files to Linux
+
+In the Linux server, create a folder.
+
+Using file manager
+
+1. Open Files.
+
+
+2. Click Home on the left side.
+
+
+3. Right-click in empty space.
+
+
+4. Click New Folder.
+
+
+5. Name it:
+
+
+
+mvdr_matlab_data
+
+6. Copy these 4 CSV files into that folder:
+
+
+
+Xtrain_real.csv
+Xtrain_imag.csv
+w_real.csv
+w_imag.csv
+
+The folder should look like:
+
+Home
+└── mvdr_matlab_data
+    ├── Xtrain_real.csv
+    ├── Xtrain_imag.csv
+    ├── w_real.csv
+    └── w_imag.csv
+
+
+---
+
+PART 3 — Create Python converter file
+
+Now open Terminal.
+
+Type:
+
+cd ~/mvdr_matlab_data
+
+Now create a Python file:
+
+gedit make_vitis_data.py
+
+If gedit does not open, use:
+
+nano make_vitis_data.py
+
+Paste this full Python code:
+
+import re
+
+N = 64
+K = 5000
+SAMPLES = N * K
+
+def read_rows(filename):
+    rows = []
+
+    with open(filename, "r", encoding="utf-8") as f:
+        for line in f:
+            tokens = re.split(r"[,\s]+", line.strip())
+            values = [float(t) for t in tokens if t != ""]
+            if values:
+                rows.append(values)
+
+    return rows
+
+def flatten_xtrain_sensor_major(filename):
+    rows = read_rows(filename)
+
+    # Correct case:
+    # MATLAB exported 64 rows and 5000 columns using writematrix(real(Xtrain))
+    if len(rows) == N and all(len(row) == K for row in rows):
+        flat = []
+
+        for sensor in range(N):
+            for snapshot in range(K):
+                flat.append(rows[sensor][snapshot])
+
+        return flat
+
+    # Wrong case:
+    # MATLAB exported one long vector
+    all_values = []
+
+    for row in rows:
+        all_values.extend(row)
+
+    if len(all_values) == SAMPLES:
+        raise ValueError(
+            filename + " contains 320000 values but not as 64 x 5000 matrix.\n"
+            "Regenerate it in MATLAB using:\n"
+            "writematrix(real(Xtrain), 'Xtrain_real.csv')\n"
+            "Do not use Xtrain(:)."
+        )
+
+    raise ValueError(
+        filename + " has wrong shape.\n"
+        "Expected 64 rows and 5000 columns."
+    )
+
+def read_vector_64(filename):
+    rows = read_rows(filename)
+
+    values = []
+
+    for row in rows:
+        values.extend(row)
+
+    if len(values) != N:
+        raise ValueError(
+            filename + " should contain exactly 64 values."
+        )
+
+    return values
+
+def write_array(f, ctype, name, values):
+    f.write(f"static const {ctype} {name}[{len(values)}] __attribute__((aligned(64))) = {{\n")
+
+    for i, v in enumerate(values):
+        f.write(f"{v:.17g}")
+
+        if i != len(values) - 1:
+            f.write(",")
+
+        if (i + 1) % 4 == 0:
+            f.write("\n")
+        else:
+            f.write(" ")
+
+    f.write("\n};\n\n")
+
+print("Reading MATLAB CSV files...")
+
+xreal = flatten_xtrain_sensor_major("Xtrain_real.csv")
+ximag = flatten_xtrain_sensor_major("Xtrain_imag.csv")
+wreal = read_vector_64("w_real.csv")
+wimag = read_vector_64("w_imag.csv")
+
+print("Lengths:")
+print("Xtrain_real:", len(xreal))
+print("Xtrain_imag:", len(ximag))
+print("w_real:", len(wreal))
+print("w_imag:", len(wimag))
+
+print("\nOrder sanity check:")
+print("Xtrain_data[0]    = MATLAB Xtrain(1,1) =", xreal[0])
+print("Xtrain_data[1]    = MATLAB Xtrain(1,2) =", xreal[1])
+print("Xtrain_data[5000] = MATLAB Xtrain(2,1) =", xreal[5000])
+
+print("\nFirst 8 golden MATLAB weights:")
+for i in range(8):
+    print(f"w[{i}] = {wreal[i]} + j{wimag[i]}")
+
+with open("mvdr_data.h", "w", encoding="utf-8") as f:
+    f.write("#ifndef MVDR_DATA_H\n")
+    f.write("#define MVDR_DATA_H\n\n")
+
+    f.write("#define N 64\n")
+    f.write("#define K 5000\n")
+    f.write("#define SAMPLES 320000\n\n")
+
+    write_array(f, "double", "Xtrain_real_data", xreal)
+    write_array(f, "double", "Xtrain_imag_data", ximag)
+    write_array(f, "double", "golden_w_real", wreal)
+    write_array(f, "double", "golden_w_imag", wimag)
+
+    f.write("#endif\n")
+
+print("\nDone. Created mvdr_data.h")
+
+Save the file.
+
+If using gedit:
+
+Ctrl + S
+Close window
+
+If using nano:
+
+Ctrl + O
+Enter
+Ctrl + X
+
+Now run:
+
+python3 make_vitis_data.py
+
+You should see:
+
+Reading MATLAB CSV files...
+Lengths:
+Xtrain_real: 320000
+Xtrain_imag: 320000
+w_real: 64
+w_imag: 64
+
+Order sanity check:
+Xtrain_data[0]    = MATLAB Xtrain(1,1) = ...
+Xtrain_data[1]    = MATLAB Xtrain(1,2) = ...
+Xtrain_data[5000] = MATLAB Xtrain(2,1) = ...
+
+Done. Created mvdr_data.h
+
+Now your folder should contain:
+
+mvdr_data.h
+
+This file is large. That is okay.
+
+
+---
+
+PART 4 — Open Vitis workspace
+
+Open Vitis exactly like you did before.
+
+You already created the platform and the previous mvdr_ip_test worked.
+
+Open the same workspace where you have:
+
+mvdr_platform
+mvdr_ip_test
+
+Do not delete anything.
+
+
+---
+
+PART 5 — Create a new Vitis application
+
+We will create a new application called:
+
+mvdr_matlab_verify
+
+Exact GUI steps
+
+1. Look at the top-left menu.
+
+
+2. Click File.
+
+
+3. Click New Component.
+
+
+4. Click Application.
+
+
+
+A new window opens.
+
+Page 1
+
+For application name, type:
+
+mvdr_matlab_verify
+
+Click Next.
+
+Page 2
+
+It will ask for platform.
+
+Select:
+
+mvdr_platform
+
+Click Next.
+
+Page 3
+
+It will ask for domain/processor.
+
+Choose:
+
+standalone on psv_cortexa72_0
+
+Click Next.
+
+Page 4
+
+If it asks for template, choose:
+
+Empty Application
+
+Click Finish.
+
+Now on the left side, you should see:
+
+mvdr_matlab_verify
+
+
+---
+
+PART 6 — Create main.c
+
+On the left side, expand:
+
+mvdr_matlab_verify
+
+Look for:
+
+src
+
+If src exists:
+
+1. Right-click src.
+
+
+2. Click New File.
+
+
+3. File name:
+
+
+
+main.c
+
+4. Click Finish.
+
+
+
+If there is no src folder:
+
+1. Right-click mvdr_matlab_verify.
+
+
+2. Click New Folder.
+
+
+3. Name it:
+
+
+
+src
+
+Then right-click src and create main.c.
+
+
+---
+
+PART 7 — Copy mvdr_data.h into Vitis app
+
+You need to copy:
+
+~/mvdr_matlab_data/mvdr_data.h
+
+into the Vitis app src folder.
+
+Easy GUI method
+
+1. Open Files.
+
+
+2. Go to:
+
+
+
+Home/mvdr_matlab_data
+
+3. Right-click mvdr_data.h.
+
+
+4. Click Copy.
+
+
+5. Go to your Vitis workspace folder.
+
+
+6. Open:
+
+
+
+workspace/mvdr_matlab_verify/src
+
+7. Right-click empty area.
+
+
+8. Click Paste.
+
+
+
+Now in Vitis, right-click the project/application and click:
+
+Refresh
+
+You should see:
+
+main.c
+mvdr_data.h
+
+inside src.
+
+
+---
+
+PART 8 — Paste complete main.c
+
+Open main.c.
+
+Paste this full code.
+
+This code includes the changes you already discovered:
+
+UINTPTR changed to (uint64_t)(uintptr_t)
+double scalar register values passed as 64-bit double bits
+asm volatile("nop") in timeout loop
+
+#include "xparameters.h"
+#include "xil_cache.h"
+#include "xil_printf.h"
+#include "xstatus.h"
+
+#include "xmvdr_top_axi.h"
+
+#include <stdint.h>
+#include <stdint.h>
+
+#include "mvdr_data.h"
+
+static double fpga_w_real[N] __attribute__((aligned(64)));
+static double fpga_w_imag[N] __attribute__((aligned(64)));
+
+static uint64_t double_to_u64(double x)
+{
+    union {
+        double d;
+        uint64_t u;
+    } converter;
+
+    converter.d = x;
+    return converter.u;
+}
+
+static double abs_double(double x)
+{
+    if (x < 0.0) {
+        return -x;
+    }
+
+    return x;
+}
+
+static void print_double_6(double value)
+{
+    int neg = 0;
+
+    if (value < 0.0) {
+        neg = 1;
+        value = -value;
+    }
+
+    int scaled = (int)(value * 1000000.0 + 0.5);
+    int whole = scaled / 1000000;
+    int frac = scaled % 1000000;
+
+    if (neg) {
+        xil_printf("-");
+    }
+
+    xil_printf("%d.%06d", whole, frac);
+}
+
+static void print_double_9_small(double value)
+{
+    int neg = 0;
+
+    if (value < 0.0) {
+        neg = 1;
+        value = -value;
+    }
+
+    /*
+     * This function is for small error values.
+     * It prints 9 digits after decimal.
+     */
+    int scaled = (int)(value * 1000000000.0 + 0.5);
+    int whole = scaled / 1000000000;
+    int frac = scaled % 1000000000;
+
+    if (neg) {
+        xil_printf("-");
+    }
+
+    xil_printf("%d.%09d", whole, frac);
+}
+
+int main(void)
+{
+    xil_printf("\r\n");
+    xil_printf("========================================\r\n");
+    xil_printf("MVDR FPGA vs MATLAB Verification Started\r\n");
+    xil_printf("========================================\r\n");
+
+    xil_printf("N       = %d\r\n", N);
+    xil_printf("K       = %d\r\n", K);
+    xil_printf("Samples = %d\r\n", SAMPLES);
+
+    /*
+     * Clear FPGA output arrays before starting IP.
+     */
+    for (int i = 0; i < N; i++) {
+        fpga_w_real[i] = 0.0;
+        fpga_w_imag[i] = 0.0;
+    }
+
+    xil_printf("\r\nChecking MATLAB data order:\r\n");
+
+    xil_printf("Xtrain_data[0]    should be MATLAB Xtrain(1,1) = ");
+    print_double_6(Xtrain_real_data[0]);
+    xil_printf(" + j");
+    print_double_6(Xtrain_imag_data[0]);
+    xil_printf("\r\n");
+
+    xil_printf("Xtrain_data[1]    should be MATLAB Xtrain(1,2) = ");
+    print_double_6(Xtrain_real_data[1]);
+    xil_printf(" + j");
+    print_double_6(Xtrain_imag_data[1]);
+    xil_printf("\r\n");
+
+    xil_printf("Xtrain_data[5000] should be MATLAB Xtrain(2,1) = ");
+    print_double_6(Xtrain_real_data[5000]);
+    xil_printf(" + j");
+    print_double_6(Xtrain_imag_data[5000]);
+    xil_printf("\r\n");
+
+    xil_printf("\r\nFirst 8 MATLAB golden weights from header:\r\n");
+
+    for (int i = 0; i < 8; i++) {
+        xil_printf("MATLAB w[%d] = ", i);
+        print_double_6(golden_w_real[i]);
+        xil_printf(" + j");
+        print_double_6(golden_w_imag[i]);
+        xil_printf("\r\n");
+    }
+
+    XMvdr_top_axi ip;
+
+    xil_printf("\r\nInitializing MVDR IP...\r\n");
+
+    int status = XMvdr_top_axi_Initialize(&ip, XPAR_XMVDR_TOP_AXI_0_DEVICE_ID);
+
+    if (status != XST_SUCCESS) {
+        xil_printf("ERROR: MVDR IP initialization failed.\r\n");
+        return -1;
+    }
+
+    xil_printf("MVDR IP initialized successfully.\r\n");
+
+    /*
+     * Cache flush before hardware starts.
+     * This makes sure the FPGA reads updated data from DDR.
+     */
+    xil_printf("Flushing cache...\r\n");
+
+    Xil_DCacheFlushRange((uintptr_t)Xtrain_real_data, sizeof(double) * SAMPLES);
+    Xil_DCacheFlushRange((uintptr_t)Xtrain_imag_data, sizeof(double) * SAMPLES);
+    Xil_DCacheFlushRange((uintptr_t)fpga_w_real, sizeof(fpga_w_real));
+    Xil_DCacheFlushRange((uintptr_t)fpga_w_imag, sizeof(fpga_w_imag));
+
+    /*
+     * Pointer arguments:
+     * Use 64-bit addresses on Versal.
+     */
+    xil_printf("Setting AXI pointer registers...\r\n");
+
+    XMvdr_top_axi_Set_Xtrain_real(&ip, (uint64_t)(uintptr_t)Xtrain_real_data);
+    XMvdr_top_axi_Set_Xtrain_imag(&ip, (uint64_t)(uintptr_t)Xtrain_imag_data);
+    XMvdr_top_axi_Set_w_real(&ip,      (uint64_t)(uintptr_t)fpga_w_real);
+    XMvdr_top_axi_Set_w_imag(&ip,      (uint64_t)(uintptr_t)fpga_w_imag);
+
+    /*
+     * Scalar arguments:
+     * az_deg, el_deg and d are double in HLS.
+     * So we send the exact 64-bit binary representation of double.
+     */
+    double az_val = 40.0;
+    double el_val = 0.0;
+    double d_val  = 0.5;
+
+    xil_printf("Setting scalar registers...\r\n");
+
+    XMvdr_top_axi_Set_az_deg(&ip, double_to_u64(az_val));
+    XMvdr_top_axi_Set_el_deg(&ip, double_to_u64(el_val));
+    XMvdr_top_axi_Set_d(&ip,      double_to_u64(d_val));
+
+    xil_printf("\r\nStarting MVDR FPGA IP...\r\n");
+
+    XMvdr_top_axi_Start(&ip);
+
+    /*
+     * Timeout wait.
+     * Do not wait forever.
+     */
+    volatile unsigned int timeout = 0xFFFFFFFFu;
+
+    while (!XMvdr_top_axi_IsDone(&ip) && timeout > 0u) {
+        asm volatile("nop");
+        timeout--;
+    }
+
+    if (timeout == 0u) {
+        xil_printf("ERROR: MVDR IP timeout. ap_done did not arrive.\r\n");
+        xil_printf("Do not keep running. Stop and check AXI/DDR/cache/registers.\r\n");
+        return -2;
+    }
+
+    xil_printf("MVDR FPGA IP done.\r\n");
+
+    /*
+     * Cache invalidate after hardware finishes.
+     * This makes CPU read FPGA-written output from DDR.
+     */
+    xil_printf("Invalidating output cache...\r\n");
+
+    Xil_DCacheInvalidateRange((uintptr_t)fpga_w_real, sizeof(fpga_w_real));
+    Xil_DCacheInvalidateRange((uintptr_t)fpga_w_imag, sizeof(fpga_w_imag));
+
+    xil_printf("\r\nFirst 8 FPGA weights:\r\n");
+
+    for (int i = 0; i < 8; i++) {
+        xil_printf("FPGA  w[%d] = ", i);
+        print_double_6(fpga_w_real[i]);
+        xil_printf(" + j");
+        print_double_6(fpga_w_imag[i]);
+        xil_printf("\r\n");
+    }
+
+    xil_printf("\r\nFirst 8 MATLAB golden weights:\r\n");
+
+    for (int i = 0; i < 8; i++) {
+        xil_printf("MATLAB w[%d] = ", i);
+        print_double_6(golden_w_real[i]);
+        xil_printf(" + j");
+        print_double_6(golden_w_imag[i]);
+        xil_printf("\r\n");
+    }
+
+    /*
+     * Numerical error calculation.
+     */
+    double max_real_error = 0.0;
+    double max_imag_error = 0.0;
+    double max_component_error = 0.0;
+
+    double sum_error_sq = 0.0;
+    double sum_golden_sq = 0.0;
+
+    for (int i = 0; i < N; i++) {
+        double er = fpga_w_real[i] - golden_w_real[i];
+        double ei = fpga_w_imag[i] - golden_w_imag[i];
+
+        double abs_er = abs_double(er);
+        double abs_ei = abs_double(ei);
+
+        if (abs_er > max_real_error) {
+            max_real_error = abs_er;
+        }
+
+        if (abs_ei > max_imag_error) {
+            max_imag_error = abs_ei;
+        }
+
+        if (abs_er > max_component_error) {
+            max_component_error = abs_er;
+        }
+
+        if (abs_ei > max_component_error) {
+            max_component_error = abs_ei;
+        }
+
+        sum_error_sq += er * er + ei * ei;
+        sum_golden_sq += golden_w_real[i] * golden_w_real[i]
+                       + golden_w_imag[i] * golden_w_imag[i];
+    }
+
+    xil_printf("\r\nVerification Results:\r\n");
+
+    xil_printf("Max real error      = ");
+    print_double_9_small(max_real_error);
+    xil_printf("\r\n");
+
+    xil_printf("Max imaginary error = ");
+    print_double_9_small(max_imag_error);
+    xil_printf("\r\n");
+
+    xil_printf("Max component error = ");
+    print_double_9_small(max_component_error);
+    xil_printf("\r\n");
+
+    xil_printf("Error power         = ");
+    print_double_9_small(sum_error_sq);
+    xil_printf("\r\n");
+
+    xil_printf("Golden weight power = ");
+    print_double_9_small(sum_golden_sq);
+    xil_printf("\r\n");
+
+    if (max_component_error < 0.000001) {
+        xil_printf("\r\nRESULT: FPGA output matches MATLAB golden output very closely.\r\n");
+    } else if (max_component_error < 0.001) {
+        xil_printf("\r\nRESULT: FPGA output matches MATLAB with small numerical error.\r\n");
+    } else {
+        xil_printf("\r\nRESULT: Error is larger. Check input ordering or data mismatch.\r\n");
+    }
+
+    xil_printf("\r\nPrinting all 64 FPGA weights:\r\n");
+
+    for (int i = 0; i < N; i++) {
+        xil_printf("FPGA w[%d] = ", i);
+        print_double_6(fpga_w_real[i]);
+        xil_printf(" + j");
+        print_double_6(fpga_w_imag[i]);
+        xil_printf("\r\n");
+    }
+
+    xil_printf("\r\nMVDR FPGA vs MATLAB Verification Completed.\r\n");
+
+    while (1) {
+        asm volatile("nop");
+    }
+
+    return 0;
+}
+
+Save it:
+
+Ctrl + S
+
+
+---
+
+PART 9 — Important: if driver name is different
+
+Your old mvdr_ip_test already worked. So this code should use the same driver names as your old working code.
+
+If this line gives error:
+
+#include "xmvdr_top_axi.h"
+
+then open your old working mvdr_ip_test/main.c and copy the exact header name from there.
+
+Also if this gives error:
+
+XMvdr_top_axi
+
+or:
+
+XPAR_XMVDR_TOP_AXI_0_DEVICE_ID
+
+copy the exact names from your old working app.
+
+Because your old app already ran, those names are available somewhere.
+
+
+---
+
+PART 10 — Build the new app
+
+In Vitis left side:
+
+1. Right-click:
+
+
+
+mvdr_matlab_verify
+
+2. Click:
+
+
+
+Build
+
+Wait.
+
+If it builds successfully, continue.
+
+
+---
+
+PART 11 — If build gives memory error
+
+Because mvdr_data.h is large, it may give memory/linker error.
+
+If you see error like:
+
+region overflowed
+section .rodata will not fit
+section .bss will not fit
+
+then your application is being placed in small memory instead of DDR.
+
+Do this:
+
+1. In Vitis, find file:
+
+
+
+lscript.ld
+
+2. Open it.
+
+
+3. Look for memory section.
+
+
+4. Make sure large sections like .text, .data, .bss, .rodata, heap and stack are placed in DDR memory, not small OCM.
+
+
+
+Since this part depends on your exact Vitis view, if this error comes, send the screenshot. But do not panic. It is fixable.
+
+
+---
+
+PART 12 — Open PuTTY / Serial Monitor
+
+Before running, open PuTTY or serial terminal.
+
+Use:
+
+Baud rate: 115200
+Data bits: 8
+Parity: None
+Stop bits: 1
+Flow control: None
+
+Serial port may be one of:
+
+/dev/ttyUSB0
+/dev/ttyUSB1
+/dev/ttyACM0
+
+To check ports, open terminal:
+
+ls /dev/ttyUSB*
+ls /dev/ttyACM*
+
+
+---
+
+PART 13 — Run on hardware
+
+In Vitis:
+
+1. Click/select:
+
+
+
+mvdr_matlab_verify
+
+2. Look at top toolbar.
+
+
+3. Find the green play/run button.
+
+
+4. Click the small arrow next to it if needed.
+
+
+5. Choose:
+
+
+
+Run As
+
+6. Choose:
+
+
+
+Launch on Hardware
+
+or:
+
+Single Application Debug
+
+Wait.
+
+In PuTTY/Serial Monitor, you should see:
+
+MVDR FPGA vs MATLAB Verification Started
+Checking MATLAB data order
+MVDR IP initialized successfully
+Starting MVDR FPGA IP
+MVDR FPGA IP done
+First 8 FPGA weights
+First 8 MATLAB golden weights
+Verification Results
+RESULT: FPGA output matches MATLAB golden output...
+
+
+---
+
+PART 14 — How long to wait
+
+If it reaches:
+
+Starting MVDR FPGA IP...
+
+then wait.
+
+If it finishes normally, good.
+
+If no MVDR FPGA IP done appears within:
+
+5 to 10 minutes
+
+stop it. Do not leave it forever.
+
+
+---
+
+PART 15 — What result is good
+
+Excellent result
+
+Max component error = 0.000000xxx
+RESULT: FPGA output matches MATLAB golden output very closely.
+
+Still acceptable
+
+Max component error below 0.001
+RESULT: FPGA output matches MATLAB with small numerical error.
+
+If error is large
+
+If you see:
+
+RESULT: Error is larger. Check input ordering or data mismatch.
+
+then 
+
+then first check these lines:
+Xtrain_data[0]    should be MATLAB Xtrain(1,1)
+Xtrain_data[1]    should be MATLAB Xtrain(1,2)
+Xtrain_data[5000] should be MATLAB Xtrain(2,1)
+Compare them with MATLAB printed values.
+They must match.
+PART 16 — What screenshots to take
+Take screenshots/photos of:
+1. MATLAB export output showing Xtrain(1,1), Xtrain(1,2), Xtrain(2,1)
+2. Python output showing Xtrain_data[0], Xtrain_data[1], Xtrain_data[5000]
+3. Vitis build success
+4. PuTTY output showing MVDR FPGA IP done
+5. PuTTY output showing max error
+6. PuTTY output showing RESULT line
+7. First 8 FPGA weights and MATLAB weights
+PART 17 — What to write in report
+Use this wording:
+The same training data generated in MATLAB was exported as real and imaginary CSV files and converted into a Vitis header file. The array was flattened in sensor-major order using index = sensor_index × K + snapshot_index, matching the HLS AXI memory access pattern. The Vitis application loaded this data into DDR, started the MVDR AXI IP, waited for ap_done, read back the 64 complex weights, and compared them with the MATLAB golden weights. The maximum component error was used to verify numerical equivalence between FPGA and MATLAB results.
+Your exact checklist now
+Do this in this exact order:
+1. Open MATLAB.
+2. Add the MATLAB export code at the end.
+3. Run MATLAB.
+4. Confirm 4 CSV files are created.
+5. Copy 4 CSV files to Linux folder ~/mvdr_matlab_data.
+6. Create make_vitis_data.py.
+7. Run python3 make_vitis_data.py.
+8. Confirm mvdr_data.h is created.
+9. Open Vitis workspace.
+10. Create new application mvdr_matlab_verify.
+11. Create src/main.c.
+12. Copy mvdr_data.h into src.
+13. Paste full main.c code.
+14. Save.
+15. Build.
+16. Open PuTTY/serial terminal.
+17. Run on hardware.
+18. Take screenshots of result.
+Do not change Vivado now. Do not change HLS now. Your working board design is already proven. This step is only to prove FPGA output equals MATLAB output.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
