@@ -1101,7 +1101,407 @@ Do not change Vivado now. Do not change HLS now. Your working board design is al
 
 
   
+Yes. I’ll explain exactly how to do the linker mapping.
 
+Your mvdr_data.h is large because it contains the MATLAB input arrays. So Vitis must place big sections in DDR, not small OCM/PMC memory.
+
+The DDR memory region in your screenshot looks like:
+
+axi_noc_DDR_LOW_0
+
+That is the one we want.
+
+
+---
+
+First: make a backup
+
+Before editing anything:
+
+1. Open Vitis.
+
+
+2. In the left side panel, expand your application:
+
+
+
+mvdr_matlab_verify
+
+3. Find:
+
+
+
+lscript.ld
+
+4. Right-click lscript.ld.
+
+
+5. Click Copy.
+
+
+6. Right-click the same folder.
+
+
+7. Click Paste.
+
+
+8. Rename the copied file to:
+
+
+
+lscript_backup.ld
+
+Now your original is safe.
+
+
+---
+
+Method 1: using Vitis linker script GUI
+
+Try this first.
+
+Step 1: Open linker script settings
+
+1. In Vitis left panel, right-click:
+
+
+
+mvdr_matlab_verify
+
+2. Click:
+
+
+
+Settings
+
+or:
+
+C/C++ Build Settings
+
+or:
+
+Linker Script
+
+Different Vitis versions show slightly different names.
+
+Look for something like:
+
+Generate Linker Script
+
+or:
+
+Linker Script Generator
+
+
+---
+
+Step 2: Select memory region
+
+There may be a table showing sections like:
+
+.text
+.rodata
+.data
+.bss
+heap
+stack
+
+For each one, choose memory:
+
+axi_noc_DDR_LOW_0
+
+Set like this:
+
+Section	Memory
+
+.text	axi_noc_DDR_LOW_0
+.rodata	axi_noc_DDR_LOW_0
+.data	axi_noc_DDR_LOW_0
+.bss	axi_noc_DDR_LOW_0
+heap	axi_noc_DDR_LOW_0
+stack	axi_noc_DDR_LOW_0
+
+
+The most important one for your mvdr_data.h is:
+
+.rodata
+
+because mvdr_data.h uses:
+
+static const double Xtrain_real_data[...]
+
+const arrays usually go into .rodata.
+
+After selecting DDR, click:
+
+Generate
+
+or:
+
+Apply and Close
+
+Then build again.
+
+
+---
+
+Method 2: manual edit of lscript.ld
+
+If the GUI is confusing, do this manually.
+
+Step 1: Open lscript.ld
+
+In Vitis left panel:
+
+1. Expand:
+
+
+
+mvdr_matlab_verify
+
+2. Find:
+
+
+
+lscript.ld
+
+3. Double-click it.
+
+
+
+You will see text like this:
+
+MEMORY
+{
+   ...
+}
+
+and later:
+
+SECTIONS
+{
+   ...
+}
+
+
+---
+
+Step 2: Find the exact DDR name
+
+Inside MEMORY, find the line containing DDR.
+
+It may look like:
+
+axi_noc_DDR_LOW_0 : ORIGIN = 0x00000000, LENGTH = 0x80000000
+
+or similar.
+
+The exact address may be different. That is okay.
+
+The important thing is the name:
+
+axi_noc_DDR_LOW_0
+
+Use the exact name written in your lscript.ld.
+
+
+---
+
+Step 3: Change section placement
+
+Search for .text.
+
+You may see something like:
+
+.text : {
+   *(.text)
+   *(.text.*)
+} > psv_ocm_0
+
+Change the memory after > to DDR:
+
+.text : {
+   *(.text)
+   *(.text.*)
+} > axi_noc_DDR_LOW_0
+
+Do the same for .rodata, .data, and .bss.
+
+
+---
+
+What the important parts should look like
+
+Your final SECTIONS area should have placements like this:
+
+.text : {
+   *(.text)
+   *(.text.*)
+   *(.gnu.linkonce.t.*)
+} > axi_noc_DDR_LOW_0
+
+.rodata : {
+   *(.rodata)
+   *(.rodata.*)
+   *(.gnu.linkonce.r.*)
+} > axi_noc_DDR_LOW_0
+
+.data : {
+   *(.data)
+   *(.data.*)
+   *(.gnu.linkonce.d.*)
+} > axi_noc_DDR_LOW_0
+
+.bss : {
+   *(.bss)
+   *(.bss.*)
+   *(COMMON)
+} > axi_noc_DDR_LOW_0
+
+For heap and stack, look for names like:
+
+.heap
+.stack
+
+or:
+
+_SDA_BASE_
+_STACK_SIZE
+_HEAP_SIZE
+
+If you see:
+
+.heap : {
+   ...
+} > psv_ocm_0
+
+change it to:
+
+.heap : {
+   ...
+} > axi_noc_DDR_LOW_0
+
+If you see:
+
+.stack : {
+   ...
+} > psv_ocm_0
+
+change it to:
+
+.stack : {
+   ...
+} > axi_noc_DDR_LOW_0
+
+
+---
+
+Simple rule
+
+Anywhere you see this for big sections:
+
+> psv_ocm_0
+
+or:
+
+> psv_pmc_ram
+
+or:
+
+> psv_r5_tcm
+
+for .text, .rodata, .data, .bss, heap, or stack, change it to:
+
+> axi_noc_DDR_LOW_0
+
+Do not change the MEMORY block addresses manually. Only change the section placement after the > symbol.
+
+
+---
+
+After editing
+
+1. Press:
+
+
+
+Ctrl + S
+
+2. Right-click:
+
+
+
+mvdr_matlab_verify
+
+3. Click:
+
+
+
+Clean
+
+or if no Clean option, click:
+
+Build
+
+4. Then build again.
+
+
+
+
+---
+
+If build succeeds
+
+Good. Then run on hardware.
+
+
+---
+
+If build still fails
+
+Look at the error.
+
+If it says:
+
+section .rodata will not fit
+
+then .rodata is still not in DDR.
+
+If it says:
+
+section .bss will not fit
+
+then .bss is still not in DDR.
+
+If it says:
+
+region axi_noc_DDR_LOW_0 overflowed
+
+then something else is wrong, because DDR should be large enough for your ~5 MB input arrays.
+
+
+---
+
+What to tell me if you get stuck
+
+Send me either:
+
+1. Screenshot of your lscript.ld, especially the MEMORY and SECTIONS parts, or
+
+
+2. Copy-paste the build error.
+
+
+
+For now, the main thing is:
+
+.rodata > axi_noc_DDR_LOW_0
+.data   > axi_noc_DDR_LOW_0
+.bss    > axi_noc_DDR_LOW_0
+.heap   > axi_noc_DDR_LOW_0
+.stack  > axi_noc_DDR_LOW_0
+
+That will allow your large MATLAB data header to fit in DDR.
 
 
 
