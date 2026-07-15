@@ -1,0 +1,264 @@
+Yes, sir may definitely ask latency. You should print it in PuTTY from the Vitis application.
+
+There are two latency values you can report:
+
+1. FPGA IP latency only
+   Time from XMvdr_top_axi_Start() to ap_done
+
+2. Full software test time
+   Cache flush + IP run + cache invalidate + comparison
+
+For your project, the most important one is:
+
+FPGA MVDR weight-generation latency
+
+That means:
+
+> How much time the FPGA IP takes to compute the 64 complex MVDR weights after start.
+
+
+
+
+---
+
+What to add in Vitis code
+
+Open your final working Vitis main.c.
+
+At the top, add this include:
+
+#include "xtime_l.h"
+
+You already have these:
+
+#include "xparameters.h"
+#include "xil_cache.h"
+#include "xil_printf.h"
+#include "xstatus.h"
+#include "xmvdr_top_axi.h"
+#include <stdint.h>
+
+So the top should include:
+
+#include "xparameters.h"
+#include "xil_cache.h"
+#include "xil_printf.h"
+#include "xstatus.h"
+#include "xtime_l.h"
+
+#include "xmvdr_top_axi.h"
+
+#include <stdint.h>
+
+
+---
+
+Add this print function
+
+Paste this above int main(void):
+
+static void print_time_ms(const char *label, u64 counts)
+{
+    /*
+     * Convert timer counts to milliseconds.
+     * COUNTS_PER_SECOND is provided by Xilinx timer library.
+     */
+    u64 ms_x1000 = (counts * 1000000ULL) / COUNTS_PER_SECOND;
+
+    u64 ms_whole = ms_x1000 / 1000ULL;
+    u64 ms_frac  = ms_x1000 % 1000ULL;
+
+    xil_printf("%s = %llu.%03llu ms\r\n", label, ms_whole, ms_frac);
+}
+
+If %llu does not print correctly in your PuTTY, use this simpler version:
+
+static void print_time_ms(const char *label, u64 counts)
+{
+    u64 us = (counts * 1000000ULL) / COUNTS_PER_SECOND;
+
+    u32 ms_whole = (u32)(us / 1000ULL);
+    u32 ms_frac  = (u32)(us % 1000ULL);
+
+    xil_printf("%s = %u.%03u ms\r\n", label, ms_whole, ms_frac);
+}
+
+Use the second one if the first one gives weird output.
+
+
+---
+
+Add timer variables inside main
+
+Inside main, near the beginning after your first print lines, add:
+
+XTime t_start;
+XTime t_done;
+XTime t_total_start;
+XTime t_total_done;
+
+
+---
+
+Measure full test time
+
+After your title prints, add:
+
+XTime_GetTime(&t_total_start);
+
+Example:
+
+xil_printf("\r\n");
+xil_printf("========================================\r\n");
+xil_printf("MVDR FPGA vs MATLAB Verification Started\r\n");
+xil_printf("========================================\r\n");
+
+XTime_GetTime(&t_total_start);
+
+At the end, before:
+
+while (1) {
+    asm volatile("nop");
+}
+
+add:
+
+XTime_GetTime(&t_total_done);
+
+print_time_ms("Total Vitis test time", t_total_done - t_total_start);
+
+This gives the full application time.
+
+
+---
+
+Measure FPGA IP latency only
+
+Find this part in your code:
+
+xil_printf("\r\nStarting MVDR FPGA IP...\r\n");
+
+XMvdr_top_axi_Start(&ip);
+
+volatile unsigned int timeout = 0xFFFFFFFFu;
+
+while (!XMvdr_top_axi_IsDone(&ip) && timeout > 0u) {
+    asm volatile("nop");
+    timeout--;
+}
+
+Replace it with this:
+
+xil_printf("\r\nStarting MVDR FPGA IP...\r\n");
+
+/*
+ * Measure FPGA-only latency:
+ * Start timer just before ap_start.
+ */
+XTime_GetTime(&t_start);
+
+XMvdr_top_axi_Start(&ip);
+
+volatile unsigned int timeout = 0xFFFFFFFFu;
+
+while (!XMvdr_top_axi_IsDone(&ip) && timeout > 0u) {
+    asm volatile("nop");
+    timeout--;
+}
+
+/*
+ * Stop timer immediately after ap_done is detected.
+ */
+XTime_GetTime(&t_done);
+
+if (timeout == 0u) {
+    xil_printf("ERROR: MVDR IP timeout. ap_done did not arrive.\r\n");
+    xil_printf("Do not keep running. Stop and check AXI/DDR/cache/registers.\r\n");
+    return -2;
+}
+
+xil_printf("MVDR FPGA IP done.\r\n");
+
+print_time_ms("FPGA MVDR weight-generation latency", t_done - t_start);
+
+Now PuTTY should print something like:
+
+MVDR FPGA IP done.
+FPGA MVDR weight-generation latency = 7.123 ms
+
+or maybe:
+
+FPGA MVDR weight-generation latency = 13.456 ms
+
+Whatever value you get is your measured board latency.
+
+
+---
+
+What latency should you report?
+
+Use this in your report:
+
+Measurement	Meaning
+
+FPGA MVDR weight-generation latency	Time from ap_start to ap_done
+Total Vitis test time	Includes cache flush, IP execution, cache invalidate, printing/comparison
+
+
+The value sir most likely wants is:
+
+FPGA MVDR weight-generation latency
+
+because that is the hardware accelerator computation time.
+
+
+---
+
+What to say if your value is different from the other guy’s 7 ms / 13 ms
+
+Say this:
+
+> Latency depends on PL clock frequency, data size, precision, and whether the measured time includes only IP execution or also software overhead such as cache flush, DDR transfer, and result comparison. I measured FPGA-only latency from ap_start to ap_done.
+
+
+
+That is the correct answer.
+
+
+---
+
+Important
+
+Do not compare blindly unless both of you measured the same thing.
+
+If he measured:
+
+cache flush + IP + cache invalidate
+
+and you measured:
+
+only IP start to done
+
+then values will differ.
+
+Your clean measurement is:
+
+Start timer
+XMvdr_top_axi_Start()
+wait for ap_done
+Stop timer
+
+That is valid hardware latency.
+
+
+---
+
+Add this to report
+
+Use this sentence:
+
+> The board-level latency was measured in the Vitis standalone application using the processor timer. The timer was started immediately before asserting ap_start and stopped after ap_done was detected. This gives the FPGA MVDR weight-generation latency excluding UART printing and result comparison overhead.
+
+
+
+Today in lab, add this timer code, run once, and screenshot the PuTTY output showing the latency.
