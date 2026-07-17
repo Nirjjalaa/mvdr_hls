@@ -1,0 +1,560 @@
+Okay. We will explain only the Vitis HLS MVDR process now.
+
+Think of the HLS code as one factory:
+
+Input data
+   ↓
+Steering vector
+   ↓
+Covariance matrix
+   ↓
+QR decomposition
+   ↓
+Back substitution
+   ↓
+Normalize
+   ↓
+Final MVDR beamforming coefficients
+
+
+---
+
+1. mvdr_top_axi — main HLS top function
+
+This is the main hardware block.
+
+It receives:
+
+Xtrain_real[320000]
+Xtrain_imag[320000]
+az_deg
+el_deg
+d
+
+and gives:
+
+w_real[64]
+w_imag[64]
+
+Why 320000?
+
+64 antennas × 5000 snapshots = 320000 samples
+
+So your HLS IP is getting the training signal data of all 64 antennas.
+
+What mvdr_top_axi does logically
+
+It controls the full algorithm:
+
+Step 1: Generate target steering vector a_s
+Step 2: Read training data from DDR
+Step 3: Compute covariance matrix R
+Step 4: Add diagonal loading
+Step 5: Perform QR decomposition
+Step 6: Compute y = Qᴴa_s
+Step 7: Solve Ru × w = y using back substitution
+Step 8: Normalize w
+Step 9: Write w_real and w_imag back to DDR
+
+So mvdr_top_axi is like the manager function.
+
+
+---
+
+2. Steering vector
+
+This part calculates the phase response of the 8×8 antenna array for the target direction.
+
+Your target angle is:
+
+azimuth = 40°
+elevation = 0°
+
+The steering vector tells:
+
+> If a signal comes from this direction, what phase will each antenna element receive?
+
+
+
+Since you have 64 antenna elements:
+
+a_s has 64 complex values
+
+Each value is:
+
+a_s[i] = real part + imaginary part
+
+Mathematical idea
+
+For an 8×8 URA:
+
+x = antenna position in horizontal direction
+y = antenna position in vertical direction
+
+For each antenna element:
+
+phase = 2πd(xu + yv)
+
+where:
+
+u = sin(azimuth) × cos(elevation)
+v = sin(elevation)
+d = 0.5
+
+Then:
+
+a = e^(j phase)
+
+Using Euler form:
+
+e^(j phase) = cos(phase) + j sin(phase)
+
+So in C/HLS logic:
+
+a_real[index] = cos(phase) / sqrt(64);
+a_imag[index] = sin(phase) / sqrt(64);
+
+Simple meaning
+
+The steering vector is like the direction signature of the target.
+
+For target direction 40°,0°:
+
+a_s = target direction pattern
+
+MVDR uses this to make sure the target direction is not destroyed.
+
+
+---
+
+3. Covariance matrix calculation
+
+Now we use the training data.
+
+Your training data contains:
+
+jammer signals + noise
+
+The covariance matrix tells how the 64 antenna signals are related to each other.
+
+Size of covariance matrix:
+
+R = 64 × 64 complex matrix
+
+Mathematical equation
+
+R = (Xtrain × Xtrainᴴ) / K
+
+where:
+
+Xtrain = 64 × 5000 matrix
+Xtrainᴴ = conjugate transpose of Xtrain
+K = 5000 snapshots
+
+For one element of R:
+
+R(i,j) = sum over k of X(i,k) × conjugate(X(j,k)) / K
+
+Simple meaning
+
+For every pair of antennas:
+
+antenna i
+antenna j
+
+we check:
+
+> How similar are their received signals over 5000 samples?
+
+
+
+That similarity becomes one value in the covariance matrix.
+
+Complex multiplication logic
+
+If:
+
+X(i,k) = a + jb
+X(j,k) = c + jd
+
+Then:
+
+conjugate(X(j,k)) = c - jd
+
+So:
+
+(a + jb)(c - jd)
+
+Real part:
+
+ac + bd
+
+Imaginary part:
+
+bc - ad
+
+So in HLS logic, covariance is calculated separately as:
+
+R_real(i,j) += Xi_real × Xj_real + Xi_imag × Xj_imag
+R_imag(i,j) += Xi_imag × Xj_real - Xi_real × Xj_imag
+
+Then divide by:
+
+K = 5000
+
+
+---
+
+4. Diagonal loading
+
+After covariance calculation, we add a small value to the diagonal.
+
+R = R + δI
+
+In your project:
+
+δ = 0.01 × trace(R) / N
+
+where:
+
+trace(R) = sum of diagonal elements
+N = 64
+
+Why do we add this?
+
+Because sometimes covariance matrix can become difficult to solve.
+
+Simple meaning:
+
+> Diagonal loading makes the matrix more stable and safer for hardware computation.
+
+
+
+Without diagonal loading, QR/back substitution may become unstable if the matrix is nearly singular.
+
+
+---
+
+5. Why QR decomposition is used
+
+Original MVDR equation is:
+
+w = R⁻¹a / (aᴴR⁻¹a)
+
+But direct inverse is hard in FPGA.
+
+So instead of finding:
+
+R⁻¹a
+
+we solve:
+
+R × w_unnorm = a
+
+This gives the same useful result as R⁻¹a.
+
+Then we normalize it later.
+
+Why not inverse?
+
+Because matrix inverse needs many divisions and complex operations.
+
+For hardware, this is harder.
+
+So we use:
+
+QR decomposition + back substitution
+
+This is more hardware-friendly.
+
+
+---
+
+6. QR decomposition
+
+QR decomposition breaks the covariance matrix into two parts:
+
+R = Q × Ru
+
+Careful: here your covariance matrix is also called R, and the upper triangular matrix is often called Ru.
+
+So:
+
+Covariance matrix R = Q × Ru
+
+where:
+
+Q = orthogonal/unitary matrix
+Ru = upper triangular matrix
+
+Upper triangular means:
+
+values below diagonal are zero
+
+Example:
+
+[ x x x x
+  0 x x x
+  0 0 x x
+  0 0 0 x ]
+
+What QR is doing logically
+
+QR tries to remove the lower part of the matrix.
+
+It changes:
+
+full 64×64 matrix
+
+into:
+
+upper triangular matrix
+
+Why?
+
+Because upper triangular systems are easy to solve using back substitution.
+
+
+---
+
+7. Givens rotation in QR
+
+Your QR is based on Givens rotation.
+
+The idea is simple:
+
+> Take one unwanted value below the diagonal and rotate rows so that value becomes zero.
+
+
+
+For example, suppose we want to remove this lower value:
+
+[ a
+  b ]
+
+We find rotation values c and s such that:
+
+[ c  s ] [ a ] = [ r ]
+[-s  c ] [ b ]   [ 0 ]
+
+After rotation:
+
+b becomes 0
+
+This is repeated many times until all lower diagonal values become zero.
+
+In simple words
+
+Givens QR is like cleaning the matrix:
+
+Remove value below diagonal
+Remove next value below diagonal
+Remove next value below diagonal
+...
+Finally get upper triangular matrix
+
+For 64×64 matrix, this is done many times.
+
+That is one reason your latency is high.
+
+
+---
+
+8. After QR: why calculate y = Qᴴa
+
+We want to solve:
+
+R × w_unnorm = a
+
+But QR says:
+
+R = Q × Ru
+
+So substitute:
+
+Q × Ru × w_unnorm = a
+
+Multiply both sides by Qᴴ:
+
+Qᴴ × Q × Ru × w_unnorm = Qᴴ × a
+
+Since:
+
+Qᴴ × Q = I
+
+we get:
+
+Ru × w_unnorm = Qᴴ × a
+
+So we calculate:
+
+y = Qᴴ × a
+
+Then solve:
+
+Ru × w_unnorm = y
+
+This is the input to back substitution.
+
+
+---
+
+9. Back substitution
+
+Now Ru is upper triangular.
+
+We solve:
+
+Ru × w_unnorm = y
+
+Because Ru is upper triangular, we solve from the bottom row upward.
+
+Example small 3×3 system:
+
+r11 w1 + r12 w2 + r13 w3 = y1
+        r22 w2 + r23 w3 = y2
+                r33 w3 = y3
+
+First solve bottom:
+
+w3 = y3 / r33
+
+Then middle:
+
+w2 = (y2 - r23w3) / r22
+
+Then top:
+
+w1 = (y1 - r12w2 - r13w3) / r11
+
+For your project, this happens for:
+
+64 unknowns
+
+So we solve:
+
+w[63]
+w[62]
+w[61]
+...
+w[0]
+
+Simple meaning
+
+Back substitution finds the temporary MVDR coefficient vector:
+
+w_unnorm
+
+But it is not final yet.
+
+
+---
+
+10. Normalization
+
+After back substitution, we get:
+
+w_unnorm
+
+But MVDR has one important condition:
+
+aᴴw = 1
+
+This means:
+
+> The target direction should pass without distortion.
+
+
+
+So we calculate:
+
+normalization_factor = aᴴ × w_unnorm
+
+Then:
+
+w = w_unnorm / normalization_factor
+
+This gives final MVDR coefficients.
+
+Simple meaning
+
+Before normalization:
+
+target direction may not have exact gain 1
+
+After normalization:
+
+target direction gain becomes 1
+
+That is why it is called:
+
+distortionless response
+
+The target is preserved.
+
+
+---
+
+11. Final output
+
+Finally HLS writes:
+
+w_real[64]
+w_imag[64]
+
+to DDR.
+
+These 64 complex values are the adaptive beamforming coefficients.
+
+They are later read by the Vitis C application and compared with MATLAB.
+
+
+---
+
+Full HLS flow in one simple diagram
+
+Xtrain_real, Xtrain_imag
+        ↓
+Compute covariance matrix R
+        ↓
+Add diagonal loading
+        ↓
+Generate target steering vector a
+        ↓
+QR decomposition: R = Q × Ru
+        ↓
+Compute y = Qᴴa
+        ↓
+Back substitution: Ru × w_unnorm = y
+        ↓
+Normalize: w = w_unnorm / (aᴴw_unnorm)
+        ↓
+Output w_real[64], w_imag[64]
+
+
+---
+
+One viva answer for this whole HLS part
+
+Say this:
+
+> The Vitis HLS top function receives the real and imaginary training data from DDR through AXI master ports. It first computes the target steering vector using the azimuth and elevation angles. Then it forms the 64×64 covariance matrix from the 64×5000 training samples and adds diagonal loading for numerical stability. Instead of directly computing matrix inverse, the covariance matrix is decomposed using Givens QR decomposition. The equation is transformed into an upper triangular system, which is solved using back substitution. Finally, the solution is normalized to satisfy the MVDR distortionless constraint, and the 64 complex beamforming coefficients are written back to DDR.
+
+
+
+
+---
+
+Simplest way to remember
+
+Remember this chain:
+
+Direction → steering vector
+Training data → covariance matrix
+Covariance matrix → QR
+QR → triangular system
+Triangular system → back substitution
+Back substitution result → normalization
+Normalization → final MVDR coefficients
+
+That is the complete logic of your Vitis HLS MVDR code.
